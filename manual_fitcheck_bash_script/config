@@ -1,0 +1,8 @@
+#!/bin/bash
+# Nutanix credentials and common settings
+
+# PC_IP="{pc-ip}"
+# PORT=9440 #( or any other on which PC is reachable)
+# USERNAME="{Username}"
+# PASSWORD="{Password}"
+# OUTDIR="$(pwd)"
