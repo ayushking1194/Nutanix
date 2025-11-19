@@ -347,6 +347,147 @@ fetch_storage_containers() {
     echo "[INFO] Storage container details appended for $cluster"
 }
 
+get_all_storage_containers_io_latency() {
+    local cluster_name="$1"
+    local cluster_extID="$2"
+    local csv_file="$OUTDIR/${cluster_name}.csv"
+
+    echo "[INFO] Starting container I/O latency collection for cluster: $cluster_name ($cluster_extID)"
+    echo "," >> "$csv_file"
+    echo "CONTAINER NAME,I/O LATENCY in ms,STATUS (> 3ms is HIGH)" >> "$csv_file"
+
+    # === STEP 1: Fetch storage containers list ===
+    local resp
+    resp=$(curl -sk -u "${USERNAME}:${PASSWORD}" \
+        "https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/config/storage-containers?\$filter=clusterExtId%20eq%20'${cluster_extID}'&\$select=name,containerExtId")
+
+    if [[ -z "$resp" ]]; then
+        echo "[WARN] Storage containers API returned empty response for cluster: $cluster_name"
+        echo "[INFO] Wrote CSV header to $csv_file and exiting"
+        return
+    fi
+
+    # === STEP 2: Extract all name + extId ===
+    echo "[INFO] Extracting Containers from cluster $cluster_name"
+    printf "%s" "$resp" | awk '
+    BEGIN {
+        in_data = 0
+        brace = 0
+        obj = ""
+    }
+    {
+        line = $0
+        gsub(/\r/, "", line)
+        buffer = buffer line
+    }
+    END {
+        start = index(buffer, "\"data\":[")
+        if (!start) exit
+        i = start + length("\"data\":[")
+        while (i <= length(buffer)) {
+            c = substr(buffer, i, 1)
+            if (c == "{") {
+                brace++
+                obj = "{"
+                i++
+                while (i <= length(buffer) && brace > 0) {
+                    ch = substr(buffer, i, 1)
+                    obj = obj ch
+                    if (ch == "{") brace++
+                    if (ch == "}") brace--
+                    i++
+                }
+                process(obj)
+            }
+            i++
+        }
+    }
+
+    function process(o,   name, id, s, p, q) {
+        key_name="\"name\":\""
+        p = index(o, key_name)
+        if (p > 0) {
+            s = substr(o, p + length(key_name))
+            q = index(s, "\"")
+            name = substr(s, 1, q-1)
+        }
+        if (name == "hasError" || name == "isPaginated" || name == "isTruncated") return
+
+        key_id="\"containerExtId\":\""
+        p = index(o, key_id)
+        if (p > 0) {
+            s = substr(o, p + length(key_id))
+            q = index(s, "\"")
+            id = substr(s, 1, q-1)
+        }
+
+        if (name != "" && id != "")
+            print name "," id
+    }
+    ' | while IFS=',' read -r ctr_name ctr_extid; do
+
+        echo "[INFO] Processing container: $ctr_name"
+
+        local endTime=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        local startTime=$(date -u -v-30d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "30 days ago" +"%Y-%m-%dT%H:%M:%SZ")
+
+        url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/stats/storage-containers/${ctr_extid}?\$samplingInterval=604800&\$startTime=${startTime}&\$endTime=${endTime}"
+
+        stats=$(curl -sk -u "${USERNAME}:${PASSWORD}" "$url")
+        if [[ -z "$stats" ]]; then
+            echo "[WARN] No stats response for container $ctr_name ($ctr_extid)"
+            echo "${ctr_name},N/A,NO_DATA" >> "$csv_file"
+            continue
+        fi
+
+        values=$(echo "$stats" |
+        sed -n 's/.*"controllerAvgIoLatencyuSecs":\[\(.*\)\],"controllerNumReadIops".*/\1/p' |
+        grep -o '"value":[0-9]*' |
+        sed 's/"value"://'
+        )
+
+        if [[ -z "$values" ]]; then
+            echo "[WARN] No latency datapoints found for container $ctr_name"
+            echo "${ctr_name},N/A,NO_DATA" >> "$csv_file"
+            continue
+        fi
+
+        sum=0; count=0
+        for v in $values; do
+            # guard against non-numeric
+            if [[ "$v" =~ ^[0-9]+$ ]]; then
+                sum=$((sum + v))
+                count=$((count + 1))
+            fi
+        done
+
+        if [[ $count -eq 0 ]]; then
+            echo "[WARN] All latency datapoints were non-numeric for $ctr_name"
+            echo "${ctr_name},N/A,NO_DATA" >> "$csv_file"
+            continue
+        fi
+
+        avg=$((sum / count))   # avg in microseconds
+
+        # Convert avg from µs → ms accurately
+        avg_ms=$(echo "scale=3; $avg / 1000" | bc)
+
+        # Now check > 3 ms
+        if (( $(echo "$avg_ms > 3" | bc -l) )); then
+            status="**HIGH**"
+            echo "[WARN] High average I/O latency for $ctr_name: ${avg_ms} ms"
+        else
+            status="OK"
+            echo "[INFO] Average I/O latency for $ctr_name: ${avg_ms} ms (OK)"
+        fi
+
+        echo "${ctr_name},${avg_ms} ms,${status}" >> "$csv_file"
+
+    done
+
+    echo "[INFO] Completed container I/O latency collection for cluster: $cluster_name"
+}
+
 get_host_count() {
     local cluster="$1"
     local ext_id="$2"
@@ -374,6 +515,7 @@ get_host_count() {
     # Extract "totalAvailableResults"
     local total_hosts
     total_hosts=$(echo "$compact_json" | grep -o '"totalAvailableResults":[0-9]\+' | sed 's/"totalAvailableResults"://')
+    echo "," >> "$csv_file"
     echo "total_hosts,${total_hosts}" >> "$csv_file"
 
     echo "[INFO] Total hosts in $cluster: $total_hosts"
@@ -756,7 +898,7 @@ get_alerts() {
         warning=0; critical=0
     }
     {
-        sev=""; tit=""; msg=""; cau=""; res="";
+        sev=""; tit=""; cau=""; res="";
 
         l=$0
 
@@ -796,7 +938,6 @@ get_alerts() {
 
     echo "[INFO] Alerts appended for $cluster_name"
 }
-
 
 
 # v2.0 
@@ -1098,7 +1239,6 @@ get_directory_services_pe_v2() {
 
     echo "[INFO] Directory services from PE (v2 API) saved to $csv_file"
 }
-
 
 # v1.0
 

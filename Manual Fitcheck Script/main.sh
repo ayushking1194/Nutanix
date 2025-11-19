@@ -96,6 +96,7 @@ for ((i=0; i<${#CLUSTER_NAMES[@]}; i++)); do
     get_hosts_and_nics "$cluster" "$extid"
     fetch_cluster_stats "$cluster" "$extid"
     fetch_storage_containers "$cluster" "$extid"
+    get_all_storage_containers_io_latency "$cluster" "$extid"
     get_host_count "$cluster" "$extid"
     get_offline_disks "$cluster"
     get_license_details "$cluster" "$extid"
