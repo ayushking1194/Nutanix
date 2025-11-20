@@ -268,6 +268,7 @@ fetch_cluster_stats() {
     fi
 
     # echo "${cluster},${cpu_max},${mem_max},${storage_max}" >> "$csv_file"
+    echo "," >> "$csv_file"
     echo "CPU_Max_Hz,$cpu_max" >> "$csv_file"
     echo "MEM_Max_bytes,$mem_max" >> "$csv_file"
     echo "STORAGE_Max_bytes,$storage_max" >> "$csv_file"
@@ -429,9 +430,9 @@ get_all_storage_containers_io_latency() {
         echo "[INFO] Processing container: $ctr_name"
 
         local endTime=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        local startTime=$(date -u -v-30d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "30 days ago" +"%Y-%m-%dT%H:%M:%SZ")
+        local startTime=$(date -u -v-7d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "7 days ago" +"%Y-%m-%dT%H:%M:%SZ")
 
-        url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/stats/storage-containers/${ctr_extid}?\$samplingInterval=604800&\$startTime=${startTime}&\$endTime=${endTime}"
+        url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/stats/storage-containers/${ctr_extid}?\$samplingInterval=86400&\$startTime=${startTime}&\$endTime=${endTime}"
 
         stats=$(curl -sk -u "${USERNAME}:${PASSWORD}" "$url")
         if [[ -z "$stats" ]]; then
@@ -766,7 +767,7 @@ get_directory_services_pc() {
     # Write CSV header
     echo "," >> "$csv_file"
     echo "From Prism Central Directory Services," >> "$csv_file"
-    echo "Name,DirectoryType,URL,DomainName" >> "$csv_file"
+    echo "Name,DomainName,DirectoryType,URL" >> "$csv_file"
 
     # Loop over all entries in the data array
     echo "$response" | awk '
@@ -865,6 +866,9 @@ get_hosts_and_nics() {
     echo "[INFO] Host NICs saved to $csv_file"
 }
 
+# Global list
+TITLE_PARAMS_LIST=()
+
 get_alerts() {
     local cluster_name="$1"
     local cluster_extid="$2"
@@ -886,10 +890,51 @@ get_alerts() {
         return
     fi
 
-    # Add header
+    # Add header separator
     echo "," >> "$csv_file"
 
-    # Process response
+    #
+    # ---- extract placeholders from title into TITLE_PARAMS_LIST ----
+    #
+    while read -r key; do
+        [[ -n "$key" ]] && TITLE_PARAMS_LIST+=("$key")
+    done < <(
+        echo "$response" \
+        | sed 's/},{/}\n{/g' \
+        | awk '
+            BEGIN { IGNORECASE=1 }
+
+            {
+                l=$0
+
+                # ---- extract {placeholders} from title ----
+                if (l ~ /"title":"/) {
+
+                    # Extract the whole title value
+                    t=l
+                    sub(/.*"title":"/,"",t)
+                    sub(/".*/,"",t)
+
+                    # BusyBox AWK-compatible placeholder extraction
+                    rest=t
+                    while ((start=index(rest,"{")) > 0) {
+                        end=index(substr(rest,start+1),"}")
+                        if (end == 0) break
+
+                        key=substr(rest,start+1,end-1)
+                        print key
+
+                        rest=substr(rest,start+end+1)
+                    }
+                }
+
+            }
+        '
+    )
+
+    #
+    # ---- ORIGINAL CSV PROCESSING BLOCK (unchanged) ----
+    #
     echo "$response" \
     | sed 's/},{/}\n{/g' \
     | awk '
@@ -935,8 +980,118 @@ get_alerts() {
         print "Total CRITICAL alerts:", critical
     }
     ' >> "$csv_file"
-
     echo "[INFO] Alerts appended for $cluster_name"
+    echo "[INFO] Title params list ${TITLE_PARAMS_LIST[@]}"
+}
+
+get_alert_parameters() {
+    local cluster_name="$1"
+    local cluster_extid="$2"
+    local csv_file="$OUTDIR/${cluster_name}.csv"
+
+    local alerts_api_url="https://${PC_IP}:${PORT}/api/monitoring/v4.0/serviceability/alerts?\$filter=originatingClusterUUID%20eq%20'${cluster_extid}'%20and%20isResolved%20eq%20false&\$select=parameters"
+
+    echo "[INFO] Fetching alert parameters for $cluster_name..."
+
+    local response
+    response=$(curl -sk -u "$USERNAME:$PASSWORD" "$alerts_api_url")
+
+    if [[ -z "$response" ]]; then
+        echo "[WARN] Empty Parameter response for $cluster_name"
+        TITLE_PARAMS_LIST=()
+        return
+    fi
+
+    ##############################################################################
+    # 1. NORMALIZE + REMOVE DUPLICATES IN TITLE PARAM LIST (macOS-safe)
+    ##############################################################################
+    local DEDUPED_TITLE_LIST=()
+    local k kn
+    for k in "${TITLE_PARAMS_LIST[@]}"; do
+        kn=$(printf "%s" "$k" | tr '[:upper:]' '[:lower:]' | xargs)
+
+        if ! printf "%s\n" "${DEDUPED_TITLE_LIST[@]}" | grep -qx -- "$kn"; then
+            DEDUPED_TITLE_LIST+=( "$kn" )
+        fi
+    done
+
+    TITLE_PARAMS_LIST=( "${DEDUPED_TITLE_LIST[@]}" )
+
+    ##############################################################################
+    # 2. Extract all raw params
+    ##############################################################################
+    RAW_PAIRS=()
+    while IFS= read -r line; do
+        RAW_PAIRS+=( "$line" )
+    done < <(
+        echo "$response" \
+        | sed 's/},{/}\n{/g' \
+        | awk '
+            BEGIN { IGNORECASE=1 }
+            {
+                param=""; l=$0
+
+                if (l ~ /"paramName":"/) {
+                    x=l; sub(/.*"paramName":"/,"",x); sub(/".*/,"",x)
+                    param=x
+                }
+
+                if (l ~ /"stringValue":"/ && param != "") {
+                    if (param ~ /version/ || param ~ /id/) { param=""; next }
+                    v=l; sub(/.*"stringValue":"/,"",v); sub(/".*/,"",v)
+                    gsub(/,/, ";", param)
+                    gsub(/,/, ";", v)
+                    print param "|" v
+                    param=""
+                }
+            }
+        '
+    )
+
+    ##############################################################################
+    # 3. DE-DUPLICATE RAW_PAIRS (macOS-safe, preserves order)
+    ##############################################################################
+    UNIQUE_PAIRS=()
+    for pair in "${RAW_PAIRS[@]}"; do
+        if ! printf "%s\n" "${UNIQUE_PAIRS[@]}" | grep -qx -- "$pair"; then
+            UNIQUE_PAIRS+=( "$pair" )
+        fi
+    done
+
+    ##############################################################################
+    # 4. ORDERED OUTPUT (old behavior preserved: list all matching values)
+    ##############################################################################
+    ORDERED_OUTPUT=()
+
+    local key pname pval pname_norm key_norm
+    for key in "${TITLE_PARAMS_LIST[@]}"; do
+        key_norm=$(printf "%s" "$key" | tr '[:upper:]' '[:lower:]' | xargs)
+
+        # Collect ALL matching values
+        for pair in "${UNIQUE_PAIRS[@]}"; do
+            pname="${pair%%|*}"
+            pval="${pair#*|}"
+            pname_norm=$(printf "%s" "$pname" | tr '[:upper:]' '[:lower:]' | xargs)
+
+            if [[ "$pname_norm" == "$key_norm" ]]; then
+                ORDERED_OUTPUT+=( "${pname},${pval}" )
+            fi
+        done
+    done
+
+    ##############################################################################
+    # 5. Write to CSV
+    ##############################################################################
+    echo "," >> "$csv_file"
+    echo "PARAMETER_NAME,PARAMETER_VALUE" >> "$csv_file"
+
+    for entry in "${ORDERED_OUTPUT[@]}"; do
+        echo "$entry" >> "$csv_file"
+    done
+
+    echo "[INFO] Ordered parameters appended for $cluster_name"
+
+    TITLE_PARAMS_LIST=()
 }
 
 

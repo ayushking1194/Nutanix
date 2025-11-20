@@ -103,6 +103,7 @@ for ((i=0; i<${#CLUSTER_NAMES[@]}; i++)); do
     get_cvm_resources "$cluster" "$extid"
     get_cpu_ratio "$cluster" "$extid"
     get_alerts "$cluster" "$extid"
+    get_alert_parameters "$cluster" "$extid"
 
     echo "[INFO] Workflow completed for $cluster"
     echo "[INFO] CSV available at $csv_file"
