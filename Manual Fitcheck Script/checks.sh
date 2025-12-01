@@ -3,84 +3,61 @@ append_cluster_details() {
     local cluster="$1"
     local extid="$2"
     local csv_file="$OUTDIR/${cluster}.csv"
-    # Step 1: Fetch the cluster JSON and flatten it
+
+    # Fetch the cluster JSON
     local JSON
     JSON=$(curl -s -k -u "$USERNAME:$PASSWORD" \
-    "https://$PC_IP:$PORT/api/clustermgmt/v4.0/config/clusters/$extid" | tr -d '\n')
+        "https://$PC_IP:$PORT/api/clustermgmt/v4.0/config/clusters/$extid")
 
-    # Step 2: Extract the "externalAddress" 
-    local EXT_BLOCK
-    EXT_BLOCK=$(echo "$JSON" | sed -n 's/.*"externalAddress":{\(.*\)},"externalDataServiceIp".*/\1/p')
-    local EXT_ADDRESS
-    EXT_ADDRESS=$(echo "$EXT_BLOCK" | sed -n 's/.*"ipv4":{.*"value":"\([0-9\.]*\)".*/\1/p')
+    # --- Extract External Address ---
+    EXT_ADDRESS=$(echo "$JSON" | jq -r '.data.network.externalAddress.ipv4.value // empty')
     [[ -z "$EXT_ADDRESS" ]] && EXT_ADDRESS="*N/A*"
 
-    # Step 4: Extract externalDataServiceIp
-    local EDS_BLOCK
-    EDS_BLOCK=$(echo "$JSON" | sed -n 's/.*"externalDataServiceIp":{\(.*\)},"nameServerIpList".*/\1/p')
-    if [[ -z "$EDS_BLOCK" ]]; then
-        EDS_BLOCK=$(echo "$JSON" | sed -n 's/.*"externalDataServiceIp":{\(.*\)},"nfsSubnetWhitelist".*/\1/p')
-    fi
-    local EDS_ADDRESS
-    EDS_ADDRESS=$(echo "$EDS_BLOCK" | sed -n 's/.*"ipv4":{.*"value":"\([0-9\.]*\)".*/\1/p')
+    # --- Extract External Data Services IP ---
+    EDS_ADDRESS=$(echo "$JSON" | jq -r '.data.network.externalDataServiceIp.ipv4.value // empty')
     [[ -z "$EDS_ADDRESS" ]] && EDS_ADDRESS="*N/A*"
 
-    # Step 5: Extract Name Servers
-    local NS_BLOCK
-    NS_BLOCK=$(echo "$JSON" | sed -n 's/.*"nameServerIpList":\[\(.*\)\],"ntpServerIpList".*/\1/p')
-    local NAME_SERVERS
-    NAME_SERVERS=$(echo "$NS_BLOCK" | grep -o '"value":"[^"]*"' | sed -E 's/"value":"([^"]+)"/\1/g' | paste -sd "," -)
+    # --- Extract Name Servers ---
+    NAME_SERVERS=$(echo "$JSON" | jq -r '
+        [.data.network.nameServerIpList[].ipv4.value] | join(",")
+    ' 2>/dev/null)
     [[ -z "$NAME_SERVERS" ]] && NAME_SERVERS="*N/A*"
 
-    # Step 6: Extract NTP Servers
-    local NTP_BLOCK
-    NTP_BLOCK=$(echo "$JSON" | sed -n 's/.*"ntpServerIpList":\[\(.*\)\],"smtpServer".*/\1/p')
-    local NTP_SERVERS
-    NTP_SERVERS=$(echo "$NTP_BLOCK" | grep -o '"value":"[^"]*"' | sed -E 's/"value":"([^"]+)"/\1/g' | paste -sd "," -)
+    # --- Extract NTP Servers ---
+    NTP_SERVERS=$(echo "$JSON" | jq -r '
+        [.data.network.ntpServerIpList[].ipv4.value] | join(",")
+    ' 2>/dev/null)
     [[ -z "$NTP_SERVERS" ]] && NTP_SERVERS="*N/A*"
 
-    # Step 7: Extract AOS version
-    AOS_BLOCK=$(echo "$JSON" | sed -n 's/.*"buildInfo":{\(.*\)},"clusterFunction".*/\1/p')
-    AOS_VERSION=$(echo "$AOS_BLOCK" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+    # --- Extract AOS Version ---
+    AOS_VERSION=$(echo "$JSON" | jq -r '.data.config.buildInfo.version // empty')
     [[ -z "$AOS_VERSION" ]] && AOS_VERSION="N/A"
 
-    # Step 8: Extract Redundancy Factor
-    RF=$(echo "$JSON" | sed -n 's/.*"redundancyFactor":\([0-9]*\).*/\1/p')
+    # --- Extract Redundancy Factor ---
+    RF=$(echo "$JSON" | jq -r '.data.config.redundancyFactor // empty')
     [[ -z "$RF" ]] && RF="N/A"
 
-    # Step 9: Extract pulseStatus block only
-    PULSE_BLOCK=$(echo "$JSON" | tr -d '\n' | sed -n 's/.*"pulseStatus":{\(.*\)},"network".*/\1/p')
-    # Extract isEnabled value from the pulseStatus block
-    PULSE=$(echo "$PULSE_BLOCK" | sed -n 's/.*"isEnabled":\([^,}]*\).*/\1/p')
-    # Handle default / false formatting
+    # --- Extract Pulse Status ---
+    PULSE=$(echo "$JSON" | jq -r '.data.config.pulseStatus.isEnabled // empty')
     if [[ -z "$PULSE" ]]; then
         PULSE="N/A"
     elif [[ "$PULSE" == "false" ]]; then
         PULSE="*FALSE*"
     fi
 
-    # Step 10: Extract clusterSoftwareMap block only
-    # Flatten JSON
-    JSON_FLAT=$(echo "$JSON" | tr -d '\n')
-    # Extract all objects in clusterSoftwareMap
-    CSM_OBJECTS=$(echo "$JSON_FLAT" | sed -n 's/.*"clusterSoftwareMap":\[\(.*\)\],".*/\1/p')
-    # Loop over each object (separated by '},{')
-    NCC_VER="N/A"
-    IFS='}' read -ra OBJ_ARR <<< "$CSM_OBJECTS"
-    for obj in "${OBJ_ARR[@]}"; do
-        if echo "$obj" | grep -q '"softwareType":"NCC"'; then
-            NCC_VER=$(echo "$obj" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
-            break
-        fi
-    done
+    # --- Extract NCC Version ---
+    NCC_VER=$(echo "$JSON" | jq -r '
+        (.data.config.clusterSoftwareMap[]?
+        | select(.softwareType=="NCC")
+        | .version) // empty
+    ')
+    [[ -z "$NCC_VER" ]] && NCC_VER="N/A"
 
-    # Step 11: Extract Hypervisor Type
-    CONFIG_BLOCK=$(echo "$JSON" | sed -n 's/.*"config":{\(.*\)},"dataReductionEfficiencyStats".*/\1/p')
-    HYPERVISOR=$(echo "$JSON" | tr -d '\r' | tr '\n' ' ' | \
-        sed -n 's/.*"hypervisorTypes":[[]"\([^"]*\)".*/\1/p')
+    # --- Extract Hypervisor Type ---
+    HYPERVISOR=$(echo "$JSON" | jq -r '.data.config.hypervisorTypes[0] // empty')
     [[ -z "$HYPERVISOR" ]] && HYPERVISOR="N/A"
 
-    # Append to CSV
+    # --- Append to CSV ---
     echo "Cluster IP,$EXT_ADDRESS" >> "$csv_file"
     echo "Data Services IP,$EDS_ADDRESS" >> "$csv_file"
     echo "AOS Version,$AOS_VERSION" >> "$csv_file"
@@ -90,8 +67,6 @@ append_cluster_details() {
     echo "Redundancy Factor,$RF" >> "$csv_file"
     echo "Pulse,$PULSE" >> "$csv_file"
     echo "NCC Version,$NCC_VER" >> "$csv_file"
-
-    echo "[INFO] Appended cluster details for $cluster"
 }
 
 lcm_version_check() {
@@ -103,16 +78,17 @@ lcm_version_check() {
     json=$(curl -s -k -u "$USERNAME:$PASSWORD" \
         "https://$PC_IP:$PORT/api/lifecycle/v4.0/resources/config")
 
-    # Extract the major.minor version from "version" field
+    # ✅ Extract major.minor.patch (e.g., 3.2.1)
     local version
-    version=$(echo "$json" | grep -o '"version":"[^"]*"' | head -1 | sed -E 's/.*"version":"([0-9]+\.[0-9]+).*/\1/')
+    version=$(echo "$json" | jq -r '
+        .data.version // empty
+    ' | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
 
     # Fallback if version not found
     [[ -z "$version" ]] && version="N/A"
 
     # Append to CSV
     echo "LCM Version,$version" >> "$csv_file"
-    echo "[INFO] LCM version ($version) appended to $csv_file"
 }
 
 vs_mtu_check() {
@@ -126,6 +102,7 @@ vs_mtu_check() {
     fi
 
     echo "[INFO] Fetching vSwitch data from $ext_ip for $cluster..."
+
     local RESPONSE
     RESPONSE=$(curl -s -k -u "$USERNAME:$PASSWORD" \
         "https://$ext_ip:$PORT/api/networking/v4.0.a2/config/virtual-switches")
@@ -135,75 +112,44 @@ vs_mtu_check() {
         return
     fi
 
-    # Extract per-host internalBridgeName and hostNics using awk
-            echo "$RESPONSE" | awk '
-            {
-                print ","
-                print "Bridge Name,NICs"
-                line = $0
-                # Loop through each host object
-                while (match(line, /"internalBridgeName"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
-                    bridge = substr(line, RSTART, RLENGTH)
-                    gsub(/.*:/,"",bridge)
-                    gsub(/"/,"",bridge)
+    # =========================
+    # 1️⃣ Bridge Name & NICs (PER HOST)
+    # =========================
+    echo "," >> "$csv_file"
+    echo "Bridge Name,NICs" >> "$csv_file"
 
-                    # Move line past this internalBridgeName to avoid infinite loop
-                    line = substr(line, RSTART + RLENGTH)
+    echo "$RESPONSE" | jq -r '
+        .data[]?.clusters[]?.hosts[]? |
+        "\(.internalBridgeName),\(.hostNics | join(" "))"
+    ' | while IFS= read -r line; do
+        echo "$line" >> "$csv_file"
 
-                    # Extract hostNics array for this host
-                    if (match(line, /"hostNics"[[:space:]]*:\[[^]]+\]/)) {
-                        nics = substr(line, RSTART, RLENGTH)
-                        gsub(/.*\[/,"",nics)
-                        gsub(/\].*/,"",nics)
-                        gsub(/"/,"",nics)
-                        gsub(/,/," ",nics)
-                        print bridge "," nics
+        bridge_name=$(echo "$line" | cut -d',' -f1)
+        nics=$(echo "$line" | cut -d',' -f2)
 
-                        # Move line past this hostNics array so next host can be found
-                        line = substr(line, RSTART + RLENGTH)
-                    }
-                }
-            }
-            ' >> "$csv_file"
-
-    # Compact JSON to single line
-    local compact_json
-    compact_json=$(echo "$RESPONSE" | tr -d '\n\r')
-
-    # Extract only inside the "data" array
-    local data_array
-    data_array=$(echo "$compact_json" | sed -n 's/.*"data":\[\(.*\)\],"\$reserved".*/\1/p')
-
-    # If $reserved not found, fallback
-    if [[ -z "$data_array" ]]; then
-        data_array=$(echo "$compact_json" | sed -n 's/.*"data":\[\(.*\)\].*/\1/p')
-    fi
-
-    if [[ -z "$data_array" ]]; then
-        echo "[WARN] No 'data' array found in vSwitch JSON for $cluster. Check Authorization on Prism Element."
-        return
-    fi
-
-    # Split the VirtualSwitch objects (they are separated by "},{" )
-    echo "$data_array" | sed 's/},{/}§{/g' | tr '§' '\n' | while IFS= read -r vs; do
-        # Extract the name field
-        local name
-        name=$(echo "$vs" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"\([^"]*\)"/\1/')
-
-        # Extract the MTU value
-        local mtu
-        mtu=$(echo "$vs" | grep -o '"mtu":[0-9]\+' | head -1 | sed 's/"mtu"://')
-
-        # Extract the bond mode
-        local bond_mode
-        bond_mode=$(echo "$vs" | grep -o '"bondMode":"[^"]*"' | head -1 | sed 's/"bondMode":"\([^"]*\)"/\1/')
-
-        if [[ -n "$name" && -n "$mtu" ]]; then
-            echo "," >> "$csv_file"
-            echo "${name},mtu=${mtu},bond_mode=${bond_mode}" >> "$csv_file"
-            echo "[INFO] Found vSwitch: $name, MTU: $mtu for $cluster"
-        fi
+        echo "[INFO] Found bridge: $bridge_name with NICs: $nics for $cluster"
     done
+
+
+    # =========================
+    # 2️⃣ vSwitch MTU & Bond Mode
+    # =========================
+    echo "," >> "$csv_file"
+    echo "vSwitch,MTU,Bond_Mode" >> "$csv_file"
+
+    echo "$RESPONSE" | jq -r '
+        .data[]? |
+        "\(.name),\(.mtu),\(.bondMode // "N/A")"
+    ' | while IFS= read -r line; do
+        echo "$line" >> "$csv_file"
+
+        vs_name=$(echo "$line" | cut -d',' -f1)
+        mtu=$(echo "$line" | cut -d',' -f2)
+        bond=$(echo "$line" | cut -d',' -f3)
+
+        echo "[INFO] Found vSwitch: $vs_name, MTU: $mtu, Bond Mode: $bond for $cluster"
+    done
+
     echo "," >> "$csv_file"
 }
 
@@ -211,67 +157,78 @@ snmp_status_check() {
     local cluster="$1"
     local extid="$2"
     local csv_file="$OUTDIR/${cluster}.csv"
+
     echo "[INFO] Checking SNMP status for $cluster ($extid)..."
 
-    # Fetch SNMP JSON
+    # --- Fetch SNMP JSON ---
     local RESPONSE
     RESPONSE=$(curl -s -k -u "$USERNAME:$PASSWORD" \
         "https://$PC_IP:$PORT/api/clustermgmt/v4.0/config/clusters/$extid/snmp")
 
     if [[ -z "$RESPONSE" ]]; then
         echo "[ERROR] No response for SNMP status on $cluster"
-        echo "SNMP_Status,N/A" >> "$csv_file"
+        echo "SNMP Status,N/A" >> "$csv_file"
         return
     fi
 
-    # Compact JSON (remove newlines and spaces)
-    compact_json=$(echo "$RESPONSE" | tr -d '\n\r')
+    # --- Extract isEnabled safely ---
+    local is_enabled
+    is_enabled=$(echo "$RESPONSE" | jq -r '.data.isEnabled // empty')
 
-    # Extract the value of "isEnabled" safely
-    is_enabled=$(echo "$compact_json" | sed -E 's/.*"isEnabled":(true|false).*/\1/')
-
+    # --- Determine status ---
+    local status
     if [[ "$is_enabled" == "true" ]]; then
+        status="Enabled"
         echo "[INFO] SNMP is ENABLED for $cluster"
-        echo "\"snmp\",\"Enabled\"" >> "$OUTDIR/${cluster}.csv"
     elif [[ "$is_enabled" == "false" ]]; then
+        status="Disabled"
         echo "[INFO] SNMP is DISABLED for $cluster"
-        echo "\"snmp\",\"Disabled\"" >> "$OUTDIR/${cluster}.csv"
     else
+        status="UNKNOWN"
         echo "[WARN] Could not determine SNMP status for $cluster"
-        echo "\"snmp\",\"UNKNOWN\"" >> "$OUTDIR/${cluster}.csv"
     fi
 
+    # --- Append to CSV ---
+    echo "SNMP Status,$status" >> "$csv_file"
 }
 
 fetch_cluster_stats() {
     local cluster="$1"
     local extid="$2"
     local end_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    # macOS date uses -v for relative date; fallback for Linux
     local start_time=$(date -u -v-30d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "30 days ago" +"%Y-%m-%dT%H:%M:%SZ")
     local csv_file="$OUTDIR/${cluster}.csv"
 
     echo "[INFO] Fetching stats for $cluster ($extid)..."
-    local response=$(curl -s -k -u "$USERNAME:$PASSWORD" "https://$PC_IP:$PORT/api/clustermgmt/v4.0/stats/clusters/${extid}?\$startTime=${start_time}&\$endTime=${end_time}&\$samplingInterval=604800&\$statType=MAX&\$select=cpuUsageHz,overallMemoryUsageBytes,storageUsageBytes")
 
-    if echo "$response" | grep -q '"error"'; then
+    local response
+    response=$(curl -s -k -u "$USERNAME:$PASSWORD" \
+        "https://$PC_IP:$PORT/api/clustermgmt/v4.0/stats/clusters/${extid}?\$startTime=${start_time}&\$endTime=${end_time}&\$samplingInterval=604800&\$statType=MAX&\$select=cpuUsageHz,overallMemoryUsageBytes,storageUsageBytes")
+
+    # Check for API errors
+    if echo "$response" | jq -e '.error? // empty' >/dev/null; then
         echo "[WARN] Failed to fetch stats for $cluster"
         return
     fi
 
-    local cpu_max=$(echo "$response" | tr -d '\n\r' | grep -o '"cpuUsageHz":[^]]*' | grep -o '"value":[0-9]*' | grep -o '[0-9]*' | sort -nr | head -1)
-    local mem_max=$(echo "$response" | tr -d '\n\r' | grep -o '"overallMemoryUsageBytes":[^]]*' | grep -o '"value":[0-9]*' | grep -o '[0-9]*' | sort -nr | head -1)
-    local storage_max=$(echo "$response" | tr -d '\n\r' | grep -o '"storageUsageBytes":[^]]*' | grep -o '"value":[0-9]*' | grep -o '[0-9]*' | sort -nr | head -1)
+    # Extract MAX values safely
+    local cpu_max mem_max storage_max
 
-    if [[ -z "$cpu_max" && -z "$mem_max" && -z "$storage_max" ]]; then
-        echo "[WARN] No stats found for $cluster"
-        return
-    fi
+    cpu_max=$(echo "$response" | jq -r '.. | objects | select(has("cpuUsageHz")) | .cpuUsageHz[]?.value // empty' | sort -nr | head -1)
+    mem_max=$(echo "$response" | jq -r '.. | objects | select(has("overallMemoryUsageBytes")) | .overallMemoryUsageBytes[]?.value // empty' | sort -nr | head -1)
+    storage_max=$(echo "$response" | jq -r '.. | objects | select(has("storageUsageBytes")) | .storageUsageBytes[]?.value // empty' | sort -nr | head -1)
 
-    # echo "${cluster},${cpu_max},${mem_max},${storage_max}" >> "$csv_file"
+    # Fallback for empty values
+    [[ -z "$cpu_max" ]] && cpu_max="N/A"
+    [[ -z "$mem_max" ]] && mem_max="N/A"
+    [[ -z "$storage_max" ]] && storage_max="N/A"
+
     echo "," >> "$csv_file"
     echo "CPU_Max_Hz,$cpu_max" >> "$csv_file"
     echo "MEM_Max_bytes,$mem_max" >> "$csv_file"
     echo "STORAGE_Max_bytes,$storage_max" >> "$csv_file"
+
     echo "[INFO] Stats recorded for $cluster → CPU: $cpu_max, MEM: $mem_max, STORAGE: $storage_max"
 }
 
@@ -282,67 +239,32 @@ fetch_storage_containers() {
 
     echo "[INFO] Fetching storage containers for $cluster ($extid)..."
 
-    local RESPONSE
-    RESPONSE=$(curl -s -k -u "$USERNAME:$PASSWORD" \
+    # --- Fetch JSON ---
+    local response
+    response=$(curl -s -k -u "$USERNAME:$PASSWORD" \
         "https://$PC_IP:$PORT/api/clustermgmt/v4.0/config/storage-containers?\$filter=clusterExtId%20eq%20'${extid}'&\$select=name,erasureCode,cacheDeduplication,onDiskDedup,isCompressionEnabled")
 
-    if [[ -z "$RESPONSE" ]]; then
+    if [[ -z "$response" ]]; then
         echo "[WARN] No response from API for $cluster"
         return
     fi
 
+    # --- CSV Header ---
     echo "," >> "$csv_file"
-    echo "Storage Containers,erasureCode,cacheDeduplication,onDiskDedup,isCompressionEnabled" >> "$csv_file"
+    echo "Storage Container,erasureCode,cacheDeduplication,onDiskDedup,isCompressionEnabled" >> "$csv_file"
 
-    # Compact the JSON (remove newlines)
-    local JSON_COMPACT
-    JSON_COMPACT=$(echo "$RESPONSE" | tr -d '\n\r')
-
-    # Parse all containers
-    echo "$JSON_COMPACT" | awk '
-        BEGIN {
-            RS="\\{"
-            FS="\n"
-        }
-        {
-            # Match required fields
-            if ($0 ~ /"name":/ && $0 ~ /"erasureCode":/ && $0 ~ /"cacheDeduplication":/ && $0 ~ /"onDiskDedup":/ && $0 ~ /"isCompressionEnabled":/) {
-
-                match($0, /"name":"[^"]+"/)
-                name = substr($0, RSTART+8, RLENGTH-9)
-
-                match($0, /"erasureCode":"[^"]+"/)
-                erasureCode = substr($0, RSTART+15, RLENGTH-16)
-
-                # match($0, /"cacheDeduplication":"[^"]+"/)
-                # cacheDedup = substr($0, RSTART+24, RLENGTH-25)
-                # gsub(/"OFF"/, "OFF", cacheDedup)
-                # gsub(/"ON"/, "ON", cacheDedup)
-
-                match($0, /"cacheDeduplication":"[^"]+"/)
-                cacheDedup = substr($0, RSTART, RLENGTH)         # Get the full matched string
-                gsub(/.*:"/, "", cacheDedup)                     # Remove everything before colon + quote
-                gsub(/"/, "", cacheDedup)                        # Remove ending quote
-
-
-                match($0, /"onDiskDedup":"[^"]+"/)
-                onDiskDedup = substr($0, RSTART+15, RLENGTH-16)
-                gsub(/"OFF"/, "OFF", onDiskDedup)
-                gsub(/"ON"/, "ON", onDiskDedup)
-
-                match($0, /"isCompressionEnabled":[^,}]+/)
-                compState = substr($0, RSTART+23, RLENGTH-23)
-                gsub(/true/,"Enabled",compState)
-                gsub(/false/,"Disabled",compState)
-                gsub(/[:,}]/,"",compState)
-
-                # Skip unwanted metadata
-                if (name != "hasError" && name != "isPaginated" && name != "isTruncated") {
-                    print name "," erasureCode "," cacheDedup "," onDiskDedup "," compState
-                }
-            }
-        }
-    ' >> "$csv_file"
+    # --- Parse & append each container ---
+    echo "$response" | jq -r '
+        .data[]? |
+        select(.name != null) |
+        [
+            .name,
+            (.erasureCode // "N/A"),
+            (.cacheDeduplication // "N/A"),
+            (.onDiskDedup // "N/A"),
+            (if .isCompressionEnabled then "Enabled" else "Disabled" end)
+        ] | @csv
+    ' | sed 's/"//g' >> "$csv_file"
 
     echo "," >> "$csv_file"
     echo "[INFO] Storage container details appended for $cluster"
@@ -357,95 +279,40 @@ get_all_storage_containers_io_latency() {
     echo "," >> "$csv_file"
     echo "CONTAINER NAME,I/O LATENCY in ms,STATUS (> 3ms is HIGH)" >> "$csv_file"
 
-    # === STEP 1: Fetch storage containers list ===
+    # --- Fetch storage containers list ---
     local resp
     resp=$(curl -sk -u "${USERNAME}:${PASSWORD}" \
         "https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/config/storage-containers?\$filter=clusterExtId%20eq%20'${cluster_extID}'&\$select=name,containerExtId")
 
     if [[ -z "$resp" ]]; then
         echo "[WARN] Storage containers API returned empty response for cluster: $cluster_name"
-        echo "[INFO] Wrote CSV header to $csv_file and exiting"
         return
     fi
 
-    # === STEP 2: Extract all name + extId ===
-    echo "[INFO] Extracting Containers from cluster $cluster_name"
-    printf "%s" "$resp" | awk '
-    BEGIN {
-        in_data = 0
-        brace = 0
-        obj = ""
-    }
-    {
-        line = $0
-        gsub(/\r/, "", line)
-        buffer = buffer line
-    }
-    END {
-        start = index(buffer, "\"data\":[")
-        if (!start) exit
-        i = start + length("\"data\":[")
-        while (i <= length(buffer)) {
-            c = substr(buffer, i, 1)
-            if (c == "{") {
-                brace++
-                obj = "{"
-                i++
-                while (i <= length(buffer) && brace > 0) {
-                    ch = substr(buffer, i, 1)
-                    obj = obj ch
-                    if (ch == "{") brace++
-                    if (ch == "}") brace--
-                    i++
-                }
-                process(obj)
-            }
-            i++
-        }
-    }
+    echo "[INFO] Extracting containers from cluster $cluster_name"
 
-    function process(o,   name, id, s, p, q) {
-        key_name="\"name\":\""
-        p = index(o, key_name)
-        if (p > 0) {
-            s = substr(o, p + length(key_name))
-            q = index(s, "\"")
-            name = substr(s, 1, q-1)
-        }
-        if (name == "hasError" || name == "isPaginated" || name == "isTruncated") return
-
-        key_id="\"containerExtId\":\""
-        p = index(o, key_id)
-        if (p > 0) {
-            s = substr(o, p + length(key_id))
-            q = index(s, "\"")
-            id = substr(s, 1, q-1)
-        }
-
-        if (name != "" && id != "")
-            print name "," id
-    }
-    ' | while IFS=',' read -r ctr_name ctr_extid; do
-
+    # --- Loop over each container ---
+    echo "$resp" | jq -r '.data[]? | select(.name != null) | "\(.name),\(.containerExtId)"' | while IFS=',' read -r ctr_name ctr_extid; do
         echo "[INFO] Processing container: $ctr_name"
 
+        # macOS/Linux-compatible date
         local endTime=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
         local startTime=$(date -u -v-7d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "7 days ago" +"%Y-%m-%dT%H:%M:%SZ")
 
-        url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/stats/storage-containers/${ctr_extid}?\$samplingInterval=86400&\$startTime=${startTime}&\$endTime=${endTime}"
+        local url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/stats/storage-containers/${ctr_extid}?\$samplingInterval=86400&\$startTime=${startTime}&\$endTime=${endTime}"
 
+        local stats
         stats=$(curl -sk -u "${USERNAME}:${PASSWORD}" "$url")
+
         if [[ -z "$stats" ]]; then
             echo "[WARN] No stats response for container $ctr_name ($ctr_extid)"
             echo "${ctr_name},N/A,NO_DATA" >> "$csv_file"
             continue
         fi
 
-        values=$(echo "$stats" |
-        sed -n 's/.*"controllerAvgIoLatencyuSecs":\[\(.*\)\],"controllerNumReadIops".*/\1/p' |
-        grep -o '"value":[0-9]*' |
-        sed 's/"value"://'
-        )
+        # Extract latency values (µs)
+        local values
+        values=$(echo "$stats" | jq -r '.data.controllerAvgIoLatencyuSecs[]?.value // empty')
 
         if [[ -z "$values" ]]; then
             echo "[WARN] No latency datapoints found for container $ctr_name"
@@ -453,37 +320,27 @@ get_all_storage_containers_io_latency() {
             continue
         fi
 
-        sum=0; count=0
+        # Compute average latency
+        local sum=0
+        local count=0
         for v in $values; do
-            # guard against non-numeric
-            if [[ "$v" =~ ^[0-9]+$ ]]; then
-                sum=$((sum + v))
-                count=$((count + 1))
-            fi
+            [[ "$v" =~ ^[0-9]+$ ]] && sum=$((sum + v)) && count=$((count + 1))
         done
 
         if [[ $count -eq 0 ]]; then
-            echo "[WARN] All latency datapoints were non-numeric for $ctr_name"
+            echo "[WARN] All latency datapoints non-numeric for $ctr_name"
             echo "${ctr_name},N/A,NO_DATA" >> "$csv_file"
             continue
         fi
 
-        avg=$((sum / count))   # avg in microseconds
+        local avg=$((sum / count))  # µs
+        local avg_ms=$(echo "scale=3; $avg / 1000" | bc)
 
-        # Convert avg from µs → ms accurately
-        avg_ms=$(echo "scale=3; $avg / 1000" | bc)
-
-        # Now check > 3 ms
-        if (( $(echo "$avg_ms > 3" | bc -l) )); then
-            status="**HIGH**"
-            echo "[WARN] High average I/O latency for $ctr_name: ${avg_ms} ms"
-        else
-            status="OK"
-            echo "[INFO] Average I/O latency for $ctr_name: ${avg_ms} ms (OK)"
-        fi
+        # Threshold check
+        local status="OK"
+        (( $(echo "$avg_ms > 3" | bc -l) )) && status="**HIGH**" && echo "[WARN] High avg I/O latency for $ctr_name: ${avg_ms} ms"
 
         echo "${ctr_name},${avg_ms} ms,${status}" >> "$csv_file"
-
     done
 
     echo "[INFO] Completed container I/O latency collection for cluster: $cluster_name"
@@ -495,83 +352,52 @@ get_host_count() {
     local csv_file="$OUTDIR/${cluster}.csv"
 
     if [[ -z "$ext_id" || "$ext_id" == "N/A" ]]; then
-        echo "[WARN] Skipping host info for $cluster — No external IP found"
+        echo "[WARN] Skipping host info for $cluster — No cluster extID found"
         return
     fi
 
-    echo "[INFO] Fetching host info from $ext_id for $cluster..."
+    echo "[INFO] Fetching host info for $cluster ($ext_id)..."
+
     local RESPONSE
     RESPONSE=$(curl -s -k -u "$USERNAME:$PASSWORD" \
         "https://$PC_IP:$PORT/api/clustermgmt/v4.0/config/clusters/$ext_id/hosts?\$select=hostName,blockModel,maintenanceState,nodeStatus")
 
     if [[ -z "$RESPONSE" ]]; then
-        echo "[ERROR] No response from $ext_id"
+        echo "[ERROR] No response for host info on $cluster"
         return
     fi
 
-    # Compact JSON to single line
-    local compact_json
-    compact_json=$(echo "$RESPONSE" | tr -d '\n\r')
-
-    # Extract "totalAvailableResults"
+    # --- Total hosts safely ---
     local total_hosts
-    total_hosts=$(echo "$compact_json" | grep -o '"totalAvailableResults":[0-9]\+' | sed 's/"totalAvailableResults"://')
-    echo "," >> "$csv_file"
-    echo "total_hosts,${total_hosts}" >> "$csv_file"
+    total_hosts=$(echo "$RESPONSE" | jq -r '.totalAvailableResults // (.data | length) // 0')
 
+    echo "," >> "$csv_file"
+    echo "Total Hosts,${total_hosts}" >> "$csv_file"
     echo "[INFO] Total hosts in $cluster: $total_hosts"
 
-    echo "$compact_json" | awk '
-    {
-        # find hostName anywhere
-        print ","
-        print "Hostname,Block Model,Maintenance State,Node Status"
-        while (match($0, /"hostName":"[^"]+"/)) {
-            host_name = substr($0, RSTART+12, RLENGTH-13)
-            $0 = substr($0, RSTART + RLENGTH)  # move past hostName
+    # --- Host Table Header ---
+    echo "," >> "$csv_file"
+    echo "Hostname,Block Model,Maintenance State,Node Status" >> "$csv_file"
 
-            # search for blockModel in the remaining text
-            if (match($0, /"blockModel":"[^"]+"/)) {
-                block_model = substr($0, RSTART+13, RLENGTH-14)
-                gsub(/"/, "", block_model)  # remove any stray quotes
-                $0 = substr($0, RSTART + RLENGTH)
-            } else {
-                block_model = "**N/A**"
-            }
+    # --- Extract and format host details ---
+    echo "$RESPONSE" | jq -r '
+        # Ensure we always iterate over an array, even if missing
+        (.data // [])[] |
+        [
+            (.hostName // "**N/A**"),
+            (.blockModel // "**N/A**"),
+            (.maintenanceState // "N/A"),
+            (.nodeStatus // "**N/A**")
+        ] |
+        [
+            .[0],
+            .[1],
+            if (.[2] != "normal" and .[2] != "N/A") then "**" + .[2] + "**" else .[2] end,
+            if (.[3] != "NORMAL" and .[3] != "N/A") then "**" + .[3] + "**" else .[3] end
+        ] | @csv
+    ' | sed 's/"//g' >> "$csv_file"
 
-            # search for maintenanceState
-            if (match($0, /"maintenanceState":"[^"]+"/)) {
-                maintenance_state = substr($0, RSTART+19, RLENGTH-20)
-                gsub(/"/, "", maintenance_state)
-                if (maintenance_state != "normal" && maintenance_state != "N/A") {
-                    maintenance_state = "**" maintenance_state " **"
-                }
-                $0 = substr($0, RSTART + RLENGTH)
-            } else {
-                maintenance_state = "N/A"
-            }
-
-            # search for nodeStatus
-            if (match($0, /"nodeStatus":"[^"]+"/)) {
-                node_status = substr($0, RSTART+14, RLENGTH-15)
-                gsub(/"/, "", node_status)
-                if (node_status != "NORMAL" && node_status != "N/A") {
-                    node_status = "**" node_status " **"
-                } 
-                $0 = substr($0, RSTART + RLENGTH)
-            } else {
-                node_status = "**N/A**"
-            }
-
-            # print all info in CSV format
-            print host_name "," block_model "," maintenance_state "," node_status
-
-            # reset variables
-            host_name=""; block_model=""; maintenance_state=""; node_status=""
-        }
-        print ","
-    }'  >> "$csv_file"
-
+    echo "," >> "$csv_file"
     echo "[INFO] Host details appended to $csv_file"
 }
 
@@ -580,32 +406,34 @@ get_offline_disks() {
     local csv_file="$OUTDIR/${cluster}.csv"
 
     echo "[INFO] Fetching Offline disks for $cluster..."
+
     local RESPONSE
     RESPONSE=$(curl -s -k -u "$USERNAME:$PASSWORD" \
-        "https://$PC_IP:$PORT/api/clustermgmt/v4.0/config/disks?\$filter=clusterName%20eq%20'$cluster'%20and%20diskAdvanceConfig/isOnline%20ne%20true&\$select=diskAdvanceConfig/isOnline")
+        "https://$PC_IP:$PORT/api/clustermgmt/v4.0/config/disks?\$filter=clusterName%20eq%20'$cluster'%20and%20diskAdvanceConfig/isOnline%20ne%20true&\$select=serialNumber,diskAdvanceConfig/isOnline")
 
-    # Check totalAvailableResults
+    # --- Total offline disks ---
     local total
-    total=$(echo "$RESPONSE" | awk -F':' '/totalAvailableResults/ {gsub(/[^0-9]/,"",$2); print $2}')
+    total=$(echo "$RESPONSE" | jq -r '.totalAvailableResults // 0')
+
     if [[ -z "$total" || "$total" -eq 0 ]]; then
-        echo "[INFO] No Offline disks found for $cluster"
+        echo "[INFO] No offline disks found for $cluster"
         echo "Offline_Disks,0" >> "$csv_file"
         return
     fi
 
-    # Compact JSON
-    local compact_json
-    compact_json=$(echo "$RESPONSE" | tr -d '\n\r')
+    echo "[INFO] Found $total offline disks for $cluster"
 
-    # Parse and append to CSV
-    echo "$compact_json" | awk '
-    {
-        while (match($0, /"serialNumber":"[^"]+"/)) {
-            disk_name = substr($0, RSTART+16, RLENGTH-17)
-            $0 = substr($0, RSTART + RLENGTH)
-            print disk_name ",Offline"
-        }
-    }' >> "$csv_file"
+    # --- Extract disk serial numbers and mark Offline ---
+    echo "," >> "$csv_file"
+    echo "SerialNumber,Status" >> "$csv_file"
+
+    echo "$RESPONSE" | jq -r '
+        .data[]? |
+        [
+            (.serialNumber // "N/A"),
+            "Offline"
+        ] | @csv
+    ' | sed 's/"//g' >> "$csv_file"
 
     echo "[INFO] Offline disk info appended to $csv_file"
 }
@@ -614,7 +442,7 @@ get_license_details() {
     local cluster_name="$1"
     local cluster_extid="$2"
     local csv_file="$OUTDIR/${cluster_name}.csv"
-    local api_url="https://${PC_IP}:${PORT}/api/licensing/v4.0/config/entitlements?\$filter=clusterExtId%20eq%20'${cluster_extid}'"
+    local api_url="https://${PC_IP}:${PORT}/api/licensing/v4.0/config/entitlements?\$filter=clusterExtId%20eq%20'${cluster_extid}'&\$expand=details"
 
     echo "[INFO] Fetching license details for $cluster_name..."
 
@@ -623,47 +451,25 @@ get_license_details() {
 
     if [[ -z "$response" ]]; then
         echo "[WARN] Empty response for License API ($cluster_name)"
-        echo "License_Details,N/A" >> "$csv_file"
+        echo "License_Name,Quantity (Meter),Expiry_Date" >> "$csv_file"
+        echo "N/A,N/A,N/A" >> "$csv_file"
         return
     fi
 
     echo "," >> "$csv_file"
     echo "License_Name,Quantity (Meter),Expiry_Date" >> "$csv_file"
 
-    # --- Parse all licenses using the working awk snippet ---
-    echo "$response" | awk '
-    BEGIN {
-        RS=",";  # split JSON by commas
-    }
-    {
-        if ($0 ~ /"details":\[/) in_details=1
-
-        if (in_details && $0 ~ /"name":"/) {
-            sub(/.*"name":"/, "", $0); sub(/".*/, "", $0)
-            name=$0
-        }
-
-        if (in_details && $0 ~ /"quantity":/) {
-            sub(/.*"quantity":/, "", $0); sub(/[,}].*/, "", $0)
-            quantity=$0
-        }
-
-        if (in_details && $0 ~ /"meter":"/) {
-            sub(/.*"meter":"/, "", $0); sub(/".*/, "", $0)
-            meter=$0
-        }
-
-        if (in_details && $0 ~ /"earliestExpiryDate":"/) {
-            sub(/.*"earliestExpiryDate":"/, "", $0); sub(/".*/, "", $0)
-            expiry=$0
-            if (name && quantity && meter && expiry && meter != "NODE") {
-                printf "%s, %s (%s), %s\n", name, quantity, meter, expiry
-                name=quantity=meter=expiry=""
-            }
-        }
-
-        if (in_details && $0 ~ /\]\}/) in_details=0
-    }' >> "$csv_file"
+    # --- Parse and exclude NODE-based licenses ---
+    echo "$response" | jq -r '
+        .data[]?.details[]?
+        | select(.meter != "NODE")
+        | [
+            (.name // "N/A"),
+            ((.quantity // 0 | tostring) + " (" + (.meter // "N/A") + ")"),
+            (.earliestExpiryDate // "N/A")
+          ] 
+        | @csv
+    ' | sed 's/"//g' >> "$csv_file"
 
     echo "[INFO] License details appended for $cluster_name"
 }
@@ -675,8 +481,8 @@ get_cpu_ratio() {
 
     echo "[INFO] Calculating vCPU:pCPU ratio for $cluster_name..."
 
-    # Fetch hosts info
-    local hosts_api_url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/config/clusters/${cluster_extid}/hosts?\$select=numberOfCpuCores,numberOfCpuThreads"
+    # --- Step 1: Fetch hosts info ---
+    local hosts_api_url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/config/clusters/${cluster_extid}/hosts?\$select=numberOfCpuThreads"
     local hosts_response
     hosts_response=$(curl -sk -u "$USERNAME:$PASSWORD" "$hosts_api_url")
 
@@ -686,24 +492,12 @@ get_cpu_ratio() {
         return
     fi
 
-    # Calculate total pCPU threads across all hosts
+    # Total pCPU threads
     local total_threads
-    total_threads=$(echo "$hosts_response" | awk '
-    BEGIN { sum=0 }
-    {
-    n = split($0, a, ",")
-    for (i=1; i<=n; i++) {
-        gsub(/[{}"]/,"",a[i])
-        split(a[i], kv, ":")
-        key = kv[1]; val = kv[2]+0
-        if (key=="numberOfCpuThreads") sum += val
-    }
-    }
-    END { print sum }')
+    total_threads=$(echo "$hosts_response" | jq '[.data[]?.numberOfCpuThreads // 0] | add // 0')
+    echo "[INFO] Total pCPU threads (all hosts): $total_threads"
 
-    echo "[INFO] Total pCPU (all hosts): $total_threads"
-
-    # Fetch all VMs for the cluster
+    # --- Step 2: Fetch VMs info ---
     local vms_api_url="https://${PC_IP}:${PORT}/api/vmm/v4.0/ahv/config/vms?\$select=numSockets,numCoresPerSocket,numThreadsPerCore&\$filter=cluster/extId%20eq%20'${cluster_extid}'"
     local vms_response
     vms_response=$(curl -sk -u "$USERNAME:$PASSWORD" "$vms_api_url")
@@ -714,28 +508,17 @@ get_cpu_ratio() {
         return
     fi
 
-    # Calculate total vCPUs from all VMs
-    local total_vcpus
-    total_vcpus=$(echo "$vms_response" | awk '
-    BEGIN { sum=0 }
-    {
-        n = split($0, a, ",")
-        for (i=1; i<=n; i++) {
-            gsub(/[{}"]/,"",a[i])
-            split(a[i], kv, ":")
-            key = kv[1]; val = kv[2]+0
-            if (key=="numSockets") sockets=val
-            if (key=="numCoresPerSocket") cores=val
-            if (key=="numThreadsPerCore") { threads=val; sum += sockets*cores*threads }
-        }
-    }
-    END { print sum }')
+    # --- Step 3: Calculate total vCPUs from VMs ---
+    local total_vm_vcpus
+    total_vm_vcpus=$(echo "$vms_response" | jq '[.data[] | (.numSockets * .numCoresPerSocket * .numThreadsPerCore)] | add // 0')
+    echo "[INFO] Total vCPUs (all VMs): $total_vm_vcpus"
 
-    # Add global CVM vCPUs
-    total_vcpus=$(( total_vcpus + total_cvm_vcpus ))
-    echo "[INFO] Total vCPUs (User VMs + CVMs): $total_vcpus"
+    # --- Step 3b: Include CVM vCPUs ---
+    # total_cvm_vcpus is already set globally
+    local total_vcpus=$((total_vm_vcpus + total_cvm_vcpus))
+    echo "[INFO] Including CVM vCPUs: $total_cvm_vcpus, Total vCPUs (VMs + CVMs): $total_vcpus"
 
-    # Compute vCPU:pThread ratio
+    # --- Step 4: Compute ratio ---
     if [[ "$total_threads" -gt 0 ]]; then
         local ratio
         ratio=$(awk "BEGIN {printf \"%.2f\", $total_vcpus / $total_threads}")
@@ -759,7 +542,9 @@ get_directory_services_pc() {
 
     if [[ -z "$response" ]]; then
         echo "[WARN] Empty response from Directory Services API"
-        echo "Name,DirectoryType,URL,DomainName" >> "$csv_file"
+        echo "," >> "$csv_file"
+        echo "From Prism Central Directory Services," >> "$csv_file"
+        echo "Name,DomainName,DirectoryType,URL" >> "$csv_file"
         echo "N/A,N/A,N/A,N/A" >> "$csv_file"
         return
     fi
@@ -769,28 +554,18 @@ get_directory_services_pc() {
     echo "From Prism Central Directory Services," >> "$csv_file"
     echo "Name,DomainName,DirectoryType,URL" >> "$csv_file"
 
-    # Loop over all entries in the data array
-    echo "$response" | awk '
-    BEGIN { inData=0; RS="\\{"; FS="," }
-    /"data":\[/ { inData=1 } 
-    inData {
-        name=""; domain=""; dirType=""; url=""
-        for(i=1;i<=NF;i++){
-            gsub(/["\[\]{}]/,"",$i)
-            split($i, kv, ":")
-            key=kv[1]; val=kv[2]
-            if(key=="name") name=val
-            if(key=="domainName") domain=val
-            if(key=="directoryType") dirType=val
-            if(key=="url") {
-                idx=index($i,":")
-                url=substr($i, idx+1)
-                gsub(/^ +| +$/,"",url)
-            }
-        }
-        # Skip undesired names
-        if(name!="" && name!="hasError" && name!="isPaginated") print name "," domain "," dirType "," url
-    }' >> "$csv_file"
+    # Extract and format using jq
+    echo "$response" | jq -r '
+        .data[]? 
+        | select(.name != null and .name != "hasError" and .name != "isPaginated")
+        | [
+            .name // "N/A",
+            .domainName // "N/A",
+            .directoryType // "N/A",
+            .url // "N/A"
+          ] 
+        | @csv
+    ' >> "$csv_file"
 
     echo "[INFO] Directory services saved to $csv_file"
 }
@@ -802,6 +577,9 @@ get_hosts_and_nics() {
 
     echo "[INFO] Fetching hosts for cluster $cluster_extid ..."
 
+    # Create CSV header once
+    echo "host,nic,status" >> "$csv_file"
+
     local hosts_api_url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/config/clusters/${cluster_extid}/hosts/?\$select=hostName,extId"
     local response
     response=$(curl -sk -u "$USERNAME:$PASSWORD" "$hosts_api_url")
@@ -811,177 +589,58 @@ get_hosts_and_nics() {
         return
     fi
 
-    # Loop over each host
-    echo "$response" | awk '
-    BEGIN { inData=0; RS="\\{"; FS="," }
-    /"data":\[/ { inData=1 }
-    inData {
-        hostName=""; extId=""
-        for(i=1;i<=NF;i++){
-            gsub(/["\[\]{}]/,"",$i)
-            split($i, kv, ":")
-            key=kv[1]; val=kv[2]
-            if(key=="hostName") hostName=val
-            if(key=="extId") extId=val
-        }
-        if(hostName!="") print hostName, extId
-    }' | while read -r host_name host_id; do
+    # Loop through hosts
+    echo "$response" | jq -r '
+        .data[]?
+        | select(.hostName != null)
+        | [.hostName, .extId]
+        | @tsv
+    ' | while IFS=$'\t' read -r host_name host_id; do
 
         echo "[INFO] Fetching NICs for host $host_name ($host_id)..."
 
-        local nics_api_url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/config/clusters/${cluster_extid}/hosts/${host_id}/host-nics?\$select=interfaceStatus,name"
-        local nics_response
-        nics_response=$(curl -sk -u "$USERNAME:$PASSWORD" "$nics_api_url")
+        local page=0
+        local limit=100
+        local has_more=true
 
-        if [[ -z "$nics_response" ]]; then
-            echo "[WARN] Empty response for host $host_name NICs"
-            continue
-        fi
+        while [[ "$has_more" == "true" ]]; do
 
-        # Parse NICs and append to CSV
-        echo "," >> "$csv_file"
-        echo "NICs for Host: $host_name,Interfaces,Link Status" >> "$csv_file"
-        echo "$nics_response" | awk -v hn="$host_name" -v hi="$host_id" '
-            BEGIN { inData=0; RS="\\{"; FS="," }
-            /"data":\[/ { inData=1 }
-            inData {
-                name=""; status=""
-                for(i=1;i<=NF;i++){
-                    gsub(/["\[\]{}]/,"",$i)
-                    split($i, kv, ":")
-                    key=kv[1]; val=kv[2]
-                    if(key=="name") name=val
-                    if(key=="interfaceStatus") {
-                    if(val=="1") status="Connected"
-                    else if(val=="0") status="**Not Connected**"
-                    else status=val
-        }
-                }
-                if(name!="" && name!="hasError" && name!="isPaginated" && name!="isTruncated")
-                    print hn "," name "," status
-            }' >> "$csv_file"
+            local nics_api_url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/config/clusters/${cluster_extid}/hosts/${host_id}/host-nics?\$limit=${limit}&\$page=${page}"
+            local nics_response
+            nics_response=$(curl -sk -u "$USERNAME:$PASSWORD" "$nics_api_url")
 
+            if [[ -z "$nics_response" ]]; then
+                echo "[WARN] Empty NIC response for host $host_name (page $page)"
+                break
+            fi
+
+            # Write NIC data to CSV
+            echo "$nics_response" | jq -r --arg host "$host_name" '
+                .data[]?
+                | select(.name != null)
+                | [
+                    $host,
+                    .name,
+                    (if .interfaceStatus == "1" then "Connected"
+                     elif .interfaceStatus == "0" then "Not Connected"
+                     else .interfaceStatus end)
+                  ]
+                | @csv
+            ' >> "$csv_file"
+
+            # Pagination handling
+            local total_results
+            total_results=$(echo "$nics_response" | jq -r '.metadata.totalAvailableResults // 0')
+
+            ((page++))
+            if (( page * limit >= total_results )); then
+                has_more=false
+            fi
+
+        done
     done
 
     echo "[INFO] Host NICs saved to $csv_file"
-}
-
-# Global list
-TITLE_PARAMS_LIST=()
-
-get_alerts() {
-    local cluster_name="$1"
-    local cluster_extid="$2"
-    local csv_file="$OUTDIR/${cluster_name}.csv"
-
-    # Alerts API URL
-    local alerts_api_url="https://${PC_IP}:${PORT}/api/monitoring/v4.0/serviceability/alerts?\$filter=originatingClusterUUID%20eq%20'${cluster_extid}'%20and%20isResolved%20eq%20false&\$select=title,severity,rootCauseAnalysis"
-
-    echo "[INFO] Fetching alerts for $cluster_name..."
-
-    local response
-    response=$(curl -sk -u "$USERNAME:$PASSWORD" "$alerts_api_url")
-
-    if [[ -z "$response" ]]; then
-        echo "[WARN] Empty response for Alerts API ($cluster_name)"
-        echo "," >> "$csv_file"
-        echo "SEVERITY,TITLE,MESSAGE,CAUSE,RESOLUTION" >> "$csv_file"
-        echo "N/A,N/A,N/A,N/A,N/A" >> "$csv_file"
-        return
-    fi
-
-    # Add header separator
-    echo "," >> "$csv_file"
-
-    #
-    # ---- extract placeholders from title into TITLE_PARAMS_LIST ----
-    #
-    while read -r key; do
-        [[ -n "$key" ]] && TITLE_PARAMS_LIST+=("$key")
-    done < <(
-        echo "$response" \
-        | sed 's/},{/}\n{/g' \
-        | awk '
-            BEGIN { IGNORECASE=1 }
-
-            {
-                l=$0
-
-                # ---- extract {placeholders} from title ----
-                if (l ~ /"title":"/) {
-
-                    # Extract the whole title value
-                    t=l
-                    sub(/.*"title":"/,"",t)
-                    sub(/".*/,"",t)
-
-                    # BusyBox AWK-compatible placeholder extraction
-                    rest=t
-                    while ((start=index(rest,"{")) > 0) {
-                        end=index(substr(rest,start+1),"}")
-                        if (end == 0) break
-
-                        key=substr(rest,start+1,end-1)
-                        print key
-
-                        rest=substr(rest,start+end+1)
-                    }
-                }
-
-            }
-        '
-    )
-
-    #
-    # ---- ORIGINAL CSV PROCESSING BLOCK (unchanged) ----
-    #
-    echo "$response" \
-    | sed 's/},{/}\n{/g' \
-    | awk '
-    BEGIN {
-        print "SEVERITY,TITLE,CAUSE,RESOLUTION"
-        warning=0; critical=0
-    }
-    {
-        sev=""; tit=""; cau=""; res="";
-
-        l=$0
-
-        if (l ~ /"severity":"/) {
-            x=l; sub(/.*"severity":"/, "", x); sub(/".*/, "", x); sev=x
-        }
-
-        if (l ~ /"title":"/) {
-            x=l; sub(/.*"title":"/, "", x); sub(/".*/, "", x); tit=x
-        }
-
-        if (l ~ /"cause":"/) {
-            x=l; sub(/.*"cause":"/, "", x); sub(/".*/, "", x); cau=x
-        }
-
-        if (l ~ /"resolution":"/) {
-            x=l; sub(/.*"resolution":"/, "", x); sub(/".*/, "", x); res=x
-        }
-
-        # Skip INFO severity
-        if (sev != "" && sev != "INFO") {
-            gsub(/,/, ";", sev)
-            gsub(/,/, ";", tit)
-            gsub(/,/, ";", cau)
-            gsub(/,/, ";", res)
-            print sev "," tit "," cau "," res
-            print ","
-            if (sev=="WARNING") warning++
-            if (sev=="CRITICAL") critical++
-        }
-    }
-    END {
-        print "Total WARNING alerts:", warning
-        print "Total CRITICAL alerts:", critical
-    }
-    ' >> "$csv_file"
-    echo "[INFO] Alerts appended for $cluster_name"
-    echo "[INFO] Title params list ${TITLE_PARAMS_LIST[@]}"
 }
 
 get_alert_parameters() {
@@ -989,114 +648,102 @@ get_alert_parameters() {
     local cluster_extid="$2"
     local csv_file="$OUTDIR/${cluster_name}.csv"
 
-    local alerts_api_url="https://${PC_IP}:${PORT}/api/monitoring/v4.0/serviceability/alerts?\$filter=originatingClusterUUID%20eq%20'${cluster_extid}'%20and%20isResolved%20eq%20false&\$select=parameters"
+    echo "[INFO] Fetching alerts for $cluster_name with pagination..."
 
-    echo "[INFO] Fetching alert parameters for $cluster_name..."
+    {
+        echo ","
+        echo "SEVERITY,TITLE,CAUSE,RESOLUTION"
+    } >> "$csv_file"
 
-    local response
-    response=$(curl -sk -u "$USERNAME:$PASSWORD" "$alerts_api_url")
+    local warn_count=0
+    local crit_count=0
+    local page=0
+    local limit=100
+    local has_more=true
 
-    if [[ -z "$response" ]]; then
-        echo "[WARN] Empty Parameter response for $cluster_name"
-        TITLE_PARAMS_LIST=()
-        return
-    fi
+    while [[ "$has_more" == "true" ]]; do
+        local alerts_api_url="https://${PC_IP}:${PORT}/api/monitoring/v4.0/serviceability/alerts?\$filter=originatingClusterUUID%20eq%20'${cluster_extid}'%20and%20isResolved%20eq%20false&\$select=title,severity,rootCauseAnalysis,parameters&\$limit=${limit}&\$page=${page}"
 
-    ##############################################################################
-    # 1. NORMALIZE + REMOVE DUPLICATES IN TITLE PARAM LIST (macOS-safe)
-    ##############################################################################
-    local DEDUPED_TITLE_LIST=()
-    local k kn
-    for k in "${TITLE_PARAMS_LIST[@]}"; do
-        kn=$(printf "%s" "$k" | tr '[:upper:]' '[:lower:]' | xargs)
+        local response
+        response=$(curl -sk -u "$USERNAME:$PASSWORD" "$alerts_api_url")
 
-        if ! printf "%s\n" "${DEDUPED_TITLE_LIST[@]}" | grep -qx -- "$kn"; then
-            DEDUPED_TITLE_LIST+=( "$kn" )
+        if [[ -z "$response" || "$response" == "null" ]]; then
+            echo "[WARN] Empty response for Alerts API ($cluster_name, page $page)"
+            break
         fi
-    done
 
-    TITLE_PARAMS_LIST=( "${DEDUPED_TITLE_LIST[@]}" )
+        local record_count
+        record_count=$(echo "$response" | jq '.data | length')
 
-    ##############################################################################
-    # 2. Extract all raw params
-    ##############################################################################
-    RAW_PAIRS=()
-    while IFS= read -r line; do
-        RAW_PAIRS+=( "$line" )
-    done < <(
-        echo "$response" \
-        | sed 's/},{/}\n{/g' \
-        | awk '
-            BEGIN { IGNORECASE=1 }
-            {
-                param=""; l=$0
+        [[ "$record_count" -eq 0 ]] && break
 
-                if (l ~ /"paramName":"/) {
-                    x=l; sub(/.*"paramName":"/,"",x); sub(/".*/,"",x)
-                    param=x
-                }
+        while IFS= read -r alert_json; do
+            local sev
+            sev=$(echo "$alert_json" | jq -r '.severity // empty')
+            [[ -z "$sev" || "$sev" == "INFO" ]] && continue
 
-                if (l ~ /"stringValue":"/ && param != "") {
-                    if (param ~ /version/ || param ~ /id/) { param=""; next }
-                    v=l; sub(/.*"stringValue":"/,"",v); sub(/".*/,"",v)
-                    gsub(/,/, ";", param)
-                    gsub(/,/, ";", v)
-                    print param "|" v
-                    param=""
-                }
-            }
-        '
-    )
-
-    ##############################################################################
-    # 3. DE-DUPLICATE RAW_PAIRS (macOS-safe, preserves order)
-    ##############################################################################
-    UNIQUE_PAIRS=()
-    for pair in "${RAW_PAIRS[@]}"; do
-        if ! printf "%s\n" "${UNIQUE_PAIRS[@]}" | grep -qx -- "$pair"; then
-            UNIQUE_PAIRS+=( "$pair" )
-        fi
-    done
-
-    ##############################################################################
-    # 4. ORDERED OUTPUT (old behavior preserved: list all matching values)
-    ##############################################################################
-    ORDERED_OUTPUT=()
-
-    local key pname pval pname_norm key_norm
-    for key in "${TITLE_PARAMS_LIST[@]}"; do
-        key_norm=$(printf "%s" "$key" | tr '[:upper:]' '[:lower:]' | xargs)
-
-        # Collect ALL matching values
-        for pair in "${UNIQUE_PAIRS[@]}"; do
-            pname="${pair%%|*}"
-            pval="${pair#*|}"
-            pname_norm=$(printf "%s" "$pname" | tr '[:upper:]' '[:lower:]' | xargs)
-
-            if [[ "$pname_norm" == "$key_norm" ]]; then
-                ORDERED_OUTPUT+=( "${pname},${pval}" )
+            if [[ "$sev" == "WARNING" ]]; then
+                ((warn_count++))
+            elif [[ "$sev" == "CRITICAL" ]]; then
+                ((crit_count++))
             fi
-        done
+
+            local tit cau res
+            tit=$(echo "$alert_json" | jq -r '.title // "N/A"')
+
+            cau=$(echo "$alert_json" | jq -r '[ .rootCauseAnalysis[]?.cause // "" ] | map(select(length>0)) | join(" | ")')
+            res=$(echo "$alert_json" | jq -r '[ .rootCauseAnalysis[]?.resolution // "" ] | map(select(length>0)) | join(" | ")')
+
+            [[ -z "$cau" ]] && cau="N/A"
+            [[ -z "$res" ]] && res="N/A"
+
+            while IFS='|' read -r key val; do
+                [[ -z "$key" || -z "$val" ]] && continue
+                [[ "$key" =~ (uuid|id|version) ]] && continue
+                tit="${tit//\{$key\}/$val}"
+            done < <(
+                echo "$alert_json" | jq -r '
+                    .parameters[]?
+                    | select(.paramName != null and (.paramValue.stringValue != null))
+                    | "\(.paramName)|\(.paramValue.stringValue)"
+                '
+            )
+
+            sev="${sev//,/;}"
+            tit="${tit//,/;}"
+            cau="${cau//,/;}"
+            res="${res//,/;}"
+            sev="${sev//$'\n'/ }"
+            tit="${tit//$'\n'/ }"
+            cau="${cau//$'\n'/ }"
+            res="${res//$'\n'/ }"
+
+            echo "$sev,$tit,$cau,$res" >> "$csv_file"
+
+        done < <(echo "$response" | jq -c '.data[]')
+
+        local is_truncated
+        is_truncated=$(echo "$response" | jq -r '.metadata.flags[]? | select(.name=="isTruncated") | .value')
+
+        if [[ "$is_truncated" == "true" ]]; then
+            ((page++))
+        else
+            has_more=false
+        fi
     done
 
-    ##############################################################################
-    # 5. Write to CSV
-    ##############################################################################
-    echo "," >> "$csv_file"
-    echo "PARAMETER_NAME,PARAMETER_VALUE" >> "$csv_file"
+    {
+        echo ","
+        echo "Alert_Summary,Count"
+        echo "WARNING,$warn_count"
+        echo "CRITICAL,$crit_count"
+    } >> "$csv_file"
 
-    for entry in "${ORDERED_OUTPUT[@]}"; do
-        echo "$entry" >> "$csv_file"
-    done
-
-    echo "[INFO] Ordered parameters appended for $cluster_name"
-
-    TITLE_PARAMS_LIST=()
+    echo "[INFO] Alerts appended for $cluster_name"
+    echo "[INFO] WARNING Alerts: $warn_count | CRITICAL Alerts: $crit_count"
 }
 
-
-# v2.0 
-
+# v2.0
 get_cluster_security_config() {
     local cluster_name="$1"
     local ext_ip="$2"
@@ -1104,78 +751,88 @@ get_cluster_security_config() {
 
     echo "[INFO] Fetching Security & Compliance config for $cluster_name..."
 
-    # --- API Call ---
     local RESPONSE
     RESPONSE=$(curl -s -k -u "$USERNAME:$PASSWORD" \
         "https://$ext_ip:$PORT/api/nutanix/v2.0/cluster")
 
-    if [[ -z "$RESPONSE" ]]; then
+    if [[ -z "$RESPONSE" || "$RESPONSE" == "null" ]]; then
         echo "[WARN] No response received from $cluster_name"
         echo "Security_Config,**N/A**" >> "$csv_file"
         return
     fi
 
-    # Compact JSON
-    local JSON
-    JSON=$(echo "$RESPONSE" | tr -d '\n\r')
+    # ---------- Helper Functions (SAFE) ----------
+    bool_to_status() {
+        if [[ "$1" == "true" ]]; then
+            echo "Enabled"
+        else
+            echo "**Disabled**"
+        fi
+    }
 
-    # --- Extract Parameters ---
+    pc_status_text() {
+        if [[ "$1" == "true" ]]; then
+            echo "Connected"
+        elif [[ "$1" == "false" ]]; then
+            echo "Not Connected"
+        else
+            echo "N/A"
+        fi
+    }
 
-    # is_registered_to_pc
-    pc_status=$(echo "$JSON" | grep -o '"is_registered_to_pc"[^,}]*' | sed -E 's/.*:[[:space:]]*"?([^"}]*)"?/\1/')
+    # ---------- Safe jq Extracts ----------
+    local pc_status_raw
+    pc_status_raw=$(echo "$RESPONSE" | jq -r '.is_registered_to_pc // empty')
+    local pc_status
+    pc_status=$(pc_status_text "$pc_status_raw")
 
-    if [[ -z "$pc_status" ]]; then
-        pc_status="N/A"
-    elif [[ "$pc_status" == "true" ]]; then
-        pc_status="Connected"
-    elif [[ "$pc_status" == "false" ]]; then
-        pc_status="Not Connected"
-    fi
-
-
-    # enable_rebuild_reservation
+    local rebuild_raw
+    rebuild_raw=$(echo "$RESPONSE" | jq -r '.enable_rebuild_reservation // false')
     local rebuild_reservation
-    rebuild_reservation=$(echo "$JSON" | sed -n 's/.*"enable_rebuild_reservation":[[:space:]]*\(true\|false\).*/\1/p')
-    [[ -z "$rebuild_reservation" ]] && rebuild_reservation="N/A"
-    [[ "$rebuild_reservation" == "true" ]] && rebuild_reservation="Enabled" || rebuild_reservation="**Disabled**"
+    rebuild_reservation=$(bool_to_status "$rebuild_raw")
 
-    # disable_degraded_node_monitoring
+    local degraded_raw
+    degraded_raw=$(echo "$RESPONSE" | jq -r '.disable_degraded_node_monitoring // false')
     local degraded_monitor
-    degraded_monitor=$(echo "$JSON" | sed -n 's/.*"disable_degraded_node_monitoring":[[:space:]]*\(true\|false\).*/\1/p')
-    [[ -z "$degraded_monitor" ]] && degraded_monitor="**N/A**"
-    [[ "$degraded_monitor" == "true" ]] && degraded_monitor="**Disabled**" || degraded_monitor="Enabled"
-
-    # recycle_bin_dto.recycle_bin_ttlsecs
-    local recycle_bin_ttl
-    recycle_bin_ttl=$(echo "$JSON" | sed -n 's/.*"recycle_bin_ttlsecs":[[:space:]]*\([0-9]*\).*/\1/p')
-    if [[ -z "$recycle_bin_ttl" || "$recycle_bin_ttl" -le 0 ]]; then
-        recycle_bin_status="**Disabled**"
+    if [[ "$degraded_raw" == "true" ]]; then
+        degraded_monitor="**Disabled**"
     else
-        recycle_bin_status="Enabled"
+        degraded_monitor="Enabled"
     fi
 
-    # --- security_compliance_config subfields ---
+    local recycle_bin_ttl
+    recycle_bin_ttl=$(echo "$RESPONSE" | jq -r '.recycle_bin_dto.recycle_bin_ttlsecs // 0')
+    local recycle_bin_status
+    if [[ "$recycle_bin_ttl" -gt 0 ]]; then
+        recycle_bin_status="Enabled"
+    else
+        recycle_bin_status="**Disabled**"
+    fi
+
     local schedule
-    schedule=$(echo "$JSON" | sed -n 's/.*"security_compliance_config":[^{]*{[^}]*"schedule":[[:space:]]*"\([^"]*\)".*/\1/p')
-    [[ -z "$schedule" ]] && schedule="**N/A**"
+    schedule=$(echo "$RESPONSE" | jq -r '.security_compliance_config.schedule // "N/A"')
 
+    local aide_raw
+    aide_raw=$(echo "$RESPONSE" | jq -r '.security_compliance_config.enable_aide // false')
     local aide
-    aide=$(echo "$JSON" | sed -n 's/.*"enable_aide":[[:space:]]*\(true\|false\).*/\1/p')
-    [[ "$aide" == "true" ]] && aide="Enabled" || aide="**Disabled**"
+    aide=$(bool_to_status "$aide_raw")
 
+    local core_raw
+    core_raw=$(echo "$RESPONSE" | jq -r '.security_compliance_config.enable_core // false')
     local core
-    core=$(echo "$JSON" | sed -n 's/.*"enable_core":[[:space:]]*\(true\|false\).*/\1/p')
-    [[ "$core" == "true" ]] && core="Enabled" || core="**Disabled**"
+    core=$(bool_to_status "$core_raw")
 
+    local high_strength_raw
+    high_strength_raw=$(echo "$RESPONSE" | jq -r '.security_compliance_config.enable_high_strength_password // false')
     local high_strength
-    high_strength=$(echo "$JSON" | sed -n 's/.*"enable_high_strength_password":[[:space:]]*\(true\|false\).*/\1/p')
-    [[ "$high_strength" == "true" ]] && high_strength="Enabled" || high_strength="**Disabled**"
+    high_strength=$(bool_to_status "$high_strength_raw")
 
+    local banner_raw
+    banner_raw=$(echo "$RESPONSE" | jq -r '.security_compliance_config.enable_banner // false')
     local banner
-    banner=$(echo "$JSON" | sed -n 's/.*"enable_banner":[[:space:]]*\(true\|false\).*/\1/p')
-    [[ "$banner" == "true" ]] && banner="Enabled" || banner="**Disabled**"
+    banner=$(bool_to_status "$banner_raw")
 
-    # --- Append to CSV ---
+    # ---------- Append to CSV ----------
     {
         echo ","
         echo "Custom Hardening Parameters,Value"
@@ -1193,14 +850,14 @@ get_cluster_security_config() {
 
     echo "[INFO] Security & Compliance config appended to $csv_file"
 
-    # --- WARNINGS ---
-    [[ "$rebuild_reservation" == "Disabled" ]] && echo "[WARN] Rebuild reservation is DISABLED on $cluster_name"
-    [[ "$aide" == "Disabled" ]] && echo "[WARN] AIDE DISABLED on $cluster_name"
-    [[ "$core" == "Disabled" ]] && echo "[WARN] Core compliance DISABLED on $cluster_name"
-    [[ "$high_strength" == "Disabled" ]] && echo "[WARN] High-strength password policy DISABLED on $cluster_name"
-    [[ "$banner" == "Disabled" ]] && echo "[WARN] Welcome banner DISABLED on $cluster_name"
-    [[ "$degraded_monitor" == "Disabled" ]] && echo "[WARN] Degraded node detection is DISABLED on $cluster_name"
-    [[ "$recycle_bin_status" == "Disabled" ]] && echo "[WARN] Recycle bin is DISABLED on $cluster_name"
+    # ---------- WARNINGS ----------
+    [[ "$rebuild_reservation" == "**Disabled**" ]] && echo "[WARN] Rebuild reservation is DISABLED on $cluster_name"
+    [[ "$aide" == "**Disabled**" ]] && echo "[WARN] AIDE DISABLED on $cluster_name"
+    [[ "$core" == "**Disabled**" ]] && echo "[WARN] Core compliance DISABLED on $cluster_name"
+    [[ "$high_strength" == "**Disabled**" ]] && echo "[WARN] High-strength password policy DISABLED on $cluster_name"
+    [[ "$banner" == "**Disabled**" ]] && echo "[WARN] Welcome banner DISABLED on $cluster_name"
+    [[ "$degraded_monitor" == "**Disabled**" ]] && echo "[WARN] Degraded node detection is DISABLED on $cluster_name"
+    [[ "$recycle_bin_status" == "**Disabled**" ]] && echo "[WARN] Recycle bin is DISABLED on $cluster_name"
 }
 
 get_snapshots_info() {
@@ -1212,8 +869,7 @@ get_snapshots_info() {
 
     # --- API Call ---
     local RESPONSE
-    RESPONSE=$(curl -s -k -u "$USERNAME:$PASSWORD" \
-        "https://$ext_ip:$PORT/api/nutanix/v2.0/snapshots/")
+    RESPONSE=$(curl -s -k -u "$USERNAME:$PASSWORD" "https://$ext_ip:$PORT/api/nutanix/v2.0/snapshots/")
 
     if [[ -z "$RESPONSE" ]]; then
         echo "[WARN] No response received from $cluster_name"
@@ -1223,9 +879,9 @@ get_snapshots_info() {
 
     # --- Extract total_entities ---
     local total
-    total=$(echo "$RESPONSE" | grep -o '"total_entities":[0-9]*' | head -n1 | cut -d':' -f2)
+    total=$(echo "$RESPONSE" | jq -r '.metadata.total_entities // 0')
 
-    if [[ -z "$total" || "$total" -eq 0 ]]; then
+    if [[ "$total" -eq 0 ]]; then
         echo "[INFO] No snapshots found for $cluster_name"
         echo "total_snapshots_in_cluster,0" >> "$csv_file"
         return
@@ -1233,35 +889,25 @@ get_snapshots_info() {
 
     echo "[INFO] Total snapshots found: $total"
 
-    # --- Compact JSON for parsing ---
-    local JSON
-    JSON=$(echo "$RESPONSE" | tr -d '\n\r')
-
+    # --- Append CSV Header ---
     echo "," >> "$csv_file"
     echo "VM_Name,Snapshot_Names" >> "$csv_file"
 
-    # --- Parse snapshot_name and VM name ---
-    echo "$JSON" | awk '
-    BEGIN { RS="\\},\\{" }
-    {
-        if ($0 ~ /"snapshot_name":/ && $0 ~ /"vm_create_spec":/) {
-            if (match($0, /"snapshot_name":"[^"]+"/))
-                snap = substr($0, RSTART+17, RLENGTH-18)
-            if (match($0, /"name":"[^"]+"/))
-                vm = substr($0, RSTART+8, RLENGTH-9)
-            if (vm != "" && snap != "") {
-                snapshots[vm] = snapshots[vm] ? snapshots[vm] "," snap : snap
-            }
-            vm = snap = ""
+    # --- Group snapshots by VM using macOS-compatible awk ---
+    echo "$RESPONSE" | jq -r '.entities[] | [.vm_create_spec.name, .snapshot_name] | @tsv' | \
+    awk '{
+        vm=$1
+        snap=$2
+        if (vm in snaps) {
+            snaps[vm] = snaps[vm] "," snap
+        } else {
+            snaps[vm] = snap
         }
-    }
-    END {
-        for (v in snapshots)
-            print v "," snapshots[v]
-    }
+    } END {
+        for (v in snaps) print v "," snaps[v]
+    }' >> "$csv_file"
 
-    ' >> "$csv_file"
-
+    # --- Append total count ---
     echo "total_snapshots_in_cluster,${total}" >> "$csv_file"
     echo "," >> "$csv_file"
     echo "[INFO] Snapshot info appended to $csv_file"
@@ -1284,17 +930,19 @@ get_ha_state() {
         return
     fi
 
-    # --- Extract ha_state value ---
+    # --- Extract ha_state safely with jq ---
     local ha_state
-    ha_state=$(echo "$RESPONSE" | grep -o '"ha_state":"[^"]*"' | cut -d'"' -f4)
+    ha_state=$(echo "$RESPONSE" | jq -r '.ha_state // "N/A"')
 
-    if [[ -z "$ha_state" ]]; then
-        echo "[WARN] Unable to extract ha_state for $cluster_name"
-        echo "ha_state,N/A" >> "$csv_file"
-        return
+    # --- Log and warn if needed ---
+    if [[ "$ha_state" == "N/A" ]]; then
+        echo "[WARN] HA state not found for $cluster_name"
+    else
+        echo "[INFO] HA State for $cluster_name: $ha_state"
     fi
 
-    echo "[INFO] HA State for $cluster_name: $ha_state"
+    # --- Append to CSV ---
+    echo "," >> "$csv_file"
     echo "ha_state,${ha_state}" >> "$csv_file"
 }
 
@@ -1316,30 +964,21 @@ get_smtp_status() {
         return
     fi
 
-    # Compact JSON (remove newlines for easy parsing)
-    local JSON
-    JSON=$(echo "$RESPONSE" | tr -d '\n\r')
-
-    # --- Extract email status ---
+    # --- Extract status safely with jq ---
     local smtp_status
-    smtp_status=$(echo "$JSON" | grep -o '"status"[^,}]*' | sed -E 's/.*:[[:space:]]*"?([^"}]*)"?/\1/')
+    smtp_status=$(echo "$RESPONSE" | jq -r '.email_status.status // "N/A"')
 
-    if [[ -z "$smtp_status" ]]; then
-        smtp_status="**N/A**"
-    elif [[ "$smtp_status" == "SUCCESS" ]]; then
-        smtp_status="Success"
-    else
-        smtp_status="**Failed**"
-    fi
+    case "$smtp_status" in
+        "SUCCESS") smtp_status="Success" ;;
+        "N/A") smtp_status="**N/A**" ;;
+        *) smtp_status="**Failed**" ;;
+    esac
 
     # --- Append to CSV ---
-    {
-        echo "SMTP_Status,$smtp_status"
-    } >> "$csv_file"
-
+    echo "SMTP_Status,$smtp_status" >> "$csv_file"
     echo "[INFO] SMTP configuration status appended to $csv_file"
 
-    # --- WARNINGS ---
+    # --- Warning if failed ---
     if [[ "$smtp_status" != "Success" ]]; then
         echo "[WARN] SMTP status check FAILED or not configured properly on $cluster_name (Status: $smtp_status)"
     fi
@@ -1370,40 +1009,29 @@ get_directory_services_pe_v2() {
     echo "From Prism Element Directory Services," >> "$csv_file"
     echo "Name,Domain,DirectoryType,URL" >> "$csv_file"
 
-    # Loop over directory_list array
-    echo "$response" | awk '
-    BEGIN { inData=0; RS="\\{"; FS="," }
-    /"directory_list":\[/ { inData=1 } 
-    inData {
-        name=""; domain=""; dirType=""; url=""
-        for(i=1;i<=NF;i++){
-            gsub(/["\[\]{}]/,"",$i)
-            split($i, kv, ":")
-            key=kv[1]; val=kv[2]
-            if(key=="name") name=val
-            if(key=="domain") domain=val
-            if(key=="directory_type") dirType=val
-            if(key=="directory_url") {
-                idx=index($i,":")
-                url=substr($i, idx+1)
-                gsub(/^ +| +$/,"",url)
-            }
-        }
-        if(name!="") print name "," domain "," dirType "," url
-    }' >> "$csv_file"
+    # Parse using jq and append to CSV
+    echo "$response" | jq -r '
+        .directory_list[]? |
+        [
+            .name // "N/A",
+            .domain // "N/A",
+            .directory_type // "N/A",
+            .directory_url // "N/A"
+        ] | @csv
+    ' >> "$csv_file"
+    echo "," >> "$csv_file"
 
     echo "[INFO] Directory services from PE (v2 API) saved to $csv_file"
 }
 
 # v1.0
-
 total_cvm_vcpus=0  # global variable
 
 get_cvm_resources() {
     local cluster_name="$1"
     local cluster_extid="$2"
     local csv_file="$OUTDIR/${cluster_name}.csv"
-    
+
     echo "," >> "$csv_file"
     echo "CVM_name,memory (GiB),vCPU" >> "$csv_file"
 
@@ -1415,62 +1043,69 @@ get_cvm_resources() {
     if [[ -z "$response" ]]; then
         echo "[WARN] Empty CVM API response"
         echo "N/A,N/A,N/A" >> "$csv_file"
+        total_cvm_vcpus=0
         return
     fi
 
-    # AWK will calculate total vCPUs
-    local cvm_config
-    cvm_config=$(echo "$response" | awk '
-    BEGIN {
-        RS="{"; FS="\n"; GIB=1073741824; total_vcpus=0;
-    }
-    {
-        block=$0
-        if (block ~ /"vmName"/) {
-            name=""; mem=""; cpu=""; mem_gib=""
-            if (block ~ /"vmName"[ ]*:/) {
-                tmp=block; sub(/.*"vmName"[ ]*:[ ]*"/,"",tmp); sub(/".*/,"",tmp); name=tmp
-            }
-            if (block ~ /"memoryCapacityInBytes"[ ]*:/) {
-                tmp=block; sub(/.*"memoryCapacityInBytes"[ ]*:[ ]*/,"",tmp); sub(/[,}].*/,"",tmp)
-                mem_bytes = tmp + 0; mem_gib = mem_bytes / GIB
-            }
-            if (block ~ /"numVCpus"[ ]*:/) {
-                tmp=block; sub(/.*"numVCpus"[ ]*:[ ]*/,"",tmp); sub(/[,}].*/,"",tmp); cpu=tmp
-            }
-            if (name != "" && cpu != "" && mem_gib != "") {
-                printf "%s,%.2f GiB,%s\n", name, mem_gib, cpu
-                total_vcpus += cpu
-            }
-        }
-    }
-    END { print total_vcpus }')
+    # --- Parse CVM info with jq ---
+    local cvm_info
+    cvm_info=$(echo "$response" | jq -r '
+        .entities[]? |
+        select(.controllerVm == true) |
+        [
+            .vmName // "N/A",
+            ((.memoryCapacityInBytes // 0) / 1073741824 | tostring),
+            (.numVCpus // 0)
+        ] | @csv
+    ')
 
-    # Split CSV and total vCPUs
-    echo "$response" | awk '
-    BEGIN { RS="{"; FS="\n"; GIB=1073741824 }
-    {
-        block=$0
-        if (block ~ /"vmName"/) {
-            name=""; mem=""; cpu=""; mem_gib=""
-            if (block ~ /"vmName"[ ]*:/) { tmp=block; sub(/.*"vmName"[ ]*:[ ]*"/,"",tmp); sub(/".*/,"",tmp); name=tmp }
-            if (block ~ /"memoryCapacityInBytes"[ ]*:/) { tmp=block; sub(/.*"memoryCapacityInBytes"[ ]*:[ ]*/,"",tmp); sub(/[,}].*/,"",tmp); mem_bytes = tmp+0; mem_gib=mem_bytes/GIB }
-            if (block ~ /"numVCpus"[ ]*:/) { tmp=block; sub(/.*"numVCpus"[ ]*:[ ]*/,"",tmp); sub(/[,}].*/,"",tmp); cpu=tmp }
-            if (name != "" && cpu != "" && mem_gib != "") { print name "," mem_gib " GiB," cpu }
-        }
-    }' >> "$csv_file"
+    if [[ -z "$cvm_info" ]]; then
+        echo "N/A,N/A,N/A" >> "$csv_file"
+        total_cvm_vcpus=0
+        return
+    fi
 
-    total_cvm_vcpus=$(echo "$response" | awk '
-    BEGIN { RS="{"; FS="\n"; total=0 }
-    /"vmName"/ && /CVM/ {
-        for(i=1;i<=NF;i++){
-            if ($i ~ /"numVCpus"/) {
-                line=$i
-                sub(/.*"numVCpus"[ ]*:[ ]*/, "", line)
-                sub(/[,}].*/, "", line)
-                total += line
-            }
-        }
-    }
-    END { print total }')
+    # --- Append to CSV ---
+    echo "$cvm_info" >> "$csv_file"
+
+    # --- Calculate total CVM vCPUs ---
+    total_cvm_vcpus=$(echo "$response" | jq '[.entities[]? | select(.controllerVm == true) | (.numVCpus // 0)] | add // 0')
+    echo "[INFO] Total CVM vCPUs for $cluster_name: $total_cvm_vcpus"
+}
+
+get_storage_overprovisioning_ratio() {
+    local cluster_name="$1"
+    local cluster_ip="$2"
+    local csv_file="$OUTDIR/${cluster_name}.csv"
+
+    echo "[INFO] Fetching storage overprovisioning ratio for $cluster_name..."
+
+    local api_url="https://${cluster_ip}:${PORT}/PrismGateway/services/rest/v1/clusters"
+
+    local response
+    response=$(curl -s -k -u "$USERNAME:$PASSWORD" "$api_url")
+
+    if [[ -z "$response" ]]; then
+        echo "[WARN] Empty response from usage_stats API for $cluster_name"
+        echo "Storage_Overprovisioning_Ratio,**N/A**" >> "$csv_file"
+        return
+    fi
+
+    # Extract values using correct path
+    local pre_bytes free_bytes ratio
+    pre_bytes=$(echo "$response" | jq -r '.entities[0].usageStats["data_reduction.thin_provision.pre_reduction_bytes"] // empty')
+    free_bytes=$(echo "$response" | jq -r '.entities[0].usageStats["storage.free_bytes"] // empty')
+
+    if [[ -z "$pre_bytes" || -z "$free_bytes" || "$free_bytes" -eq 0 ]]; then
+        echo "[WARN] Could not extract valid bytes for $cluster_name"
+        echo "Storage_Overprovisioning_Ratio,**N/A**" >> "$csv_file"
+        return
+    fi
+
+    # Calculate ratio
+    ratio=$(awk "BEGIN {printf \"%.2f\", $pre_bytes/$free_bytes}")
+
+    echo "," >> "$csv_file"
+    echo "Storage_Overprovisioning_Ratio,$ratio:1" >> "$csv_file"
+    echo "[INFO] Storage overprovisioning ratio for $cluster_name: $ratio"
 }
