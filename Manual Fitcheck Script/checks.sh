@@ -1,3 +1,42 @@
+# =====================================================
+# HOW TO ADD A NEW CHECK
+# =====================================================
+# 1. Define function using one of these signatures:
+#    my_check(cluster, extid)
+#    my_check(cluster, ext_ip)
+#
+# 2. Append CSV using:
+#    echo "Key,Value" >> "$OUTDIR/${cluster}.csv"
+#
+# 3. Register function at bottom:
+#    REGISTERED_CHECKS+=(my_check)
+#
+# 4. DO NOT edit main.sh
+# =====================================================
+
+# Generic CSV write function
+init_csv() {
+    local cluster="$1"
+    local csv_file="$OUTDIR/${cluster}.csv"
+    echo "CHECK,RESULT" > "$csv_file"
+    echo "Cluster_Name,$cluster" >> "$csv_file"
+}
+
+write_csv() {
+    local cluster="$1"
+    local key="$2"
+    local value="$3"
+
+    key="${key//,/;}"
+    value="${value//,/;}"
+    echo "${key},${value}" >> "$OUTDIR/${cluster}.csv"
+}
+
+get_cluster_ip() {
+    local cluster="$1"
+    grep '^Cluster IP,' "$OUTDIR/${cluster}.csv" | cut -d',' -f2
+}
+
 # v4.0
 append_cluster_details() {
     local cluster="$1"
@@ -481,7 +520,35 @@ get_cpu_ratio() {
 
     echo "[INFO] Calculating vCPU:pCPU ratio for $cluster_name..."
 
-    # --- Step 1: Fetch hosts info ---
+    # -------------------------------------------------------
+    # Step 0: Detect Hypervisor Type from existing CSV
+    # -------------------------------------------------------
+    local hypervisor_type
+    hypervisor_type=$(awk -F',' '$1=="Hypervisor Type"{print $2}' "$csv_file")
+
+    echo "[INFO] Detected Hypervisor Type: $hypervisor_type"
+
+    if [[ -z "$hypervisor_type" ]]; then
+        echo "[WARN] Hypervisor Type not found in CSV for $cluster_name"
+        echo "vCPU_to_pCPU_Ratio,N/A" >> "$csv_file"
+        return
+    fi
+
+    # Normalize hypervisor string for API path
+    local hv_api_type
+    case "$hypervisor_type" in
+        AHV)   hv_api_type="ahv"  ;;
+        ESXi) hv_api_type="esxi" ;;
+        *)
+            echo "[WARN] Unsupported hypervisor type: $hypervisor_type"
+            echo "vCPU_to_pCPU_Ratio,N/A" >> "$csv_file"
+            return
+            ;;
+    esac
+
+    # -------------------------------------------------------
+    # Step 1: Fetch Hosts (pCPU threads)
+    # -------------------------------------------------------
     local hosts_api_url="https://${PC_IP}:${PORT}/api/clustermgmt/v4.0/config/clusters/${cluster_extid}/hosts?\$select=numberOfCpuThreads"
     local hosts_response
     hosts_response=$(curl -sk -u "$USERNAME:$PASSWORD" "$hosts_api_url")
@@ -492,42 +559,54 @@ get_cpu_ratio() {
         return
     fi
 
-    # Total pCPU threads
     local total_threads
     total_threads=$(echo "$hosts_response" | jq '[.data[]?.numberOfCpuThreads // 0] | add // 0')
+
     echo "[INFO] Total pCPU threads (all hosts): $total_threads"
 
-    # --- Step 2: Fetch VMs info ---
-    local vms_api_url="https://${PC_IP}:${PORT}/api/vmm/v4.0/ahv/config/vms?\$select=numSockets,numCoresPerSocket,numThreadsPerCore&\$filter=cluster/extId%20eq%20'${cluster_extid}'"
-    local vms_response
-    vms_response=$(curl -sk -u "$USERNAME:$PASSWORD" "$vms_api_url")
-
-    if [[ -z "$vms_response" ]]; then
-        echo "[WARN] Empty response for VMs API ($cluster_name)"
+    if [[ "$total_threads" -eq 0 ]]; then
+        echo "[WARN] Total pCPU threads is zero for $cluster_name"
         echo "vCPU_to_pCPU_Ratio,N/A" >> "$csv_file"
         return
     fi
 
-    # --- Step 3: Calculate total vCPUs from VMs ---
+    # -------------------------------------------------------
+    # Step 2: Fetch VMs (AHV or ESXi dynamically)
+    # -------------------------------------------------------
+    local vms_api_url="https://${PC_IP}:${PORT}/api/vmm/v4.0/${hv_api_type}/config/vms?\$select=numSockets,numCoresPerSocket,numThreadsPerCore&\$filter=cluster/extId%20eq%20'${cluster_extid}'"
+    local vms_response
+    vms_response=$(curl -sk -u "$USERNAME:$PASSWORD" "$vms_api_url")
+
+    if [[ -z "$vms_response" ]]; then
+        echo "[WARN] Empty response for ${hypervisor_type} VMs API ($cluster_name)"
+        echo "vCPU_to_pCPU_Ratio,N/A" >> "$csv_file"
+        return
+    fi
+
+    # -------------------------------------------------------
+    # Step 3: Calculate total vCPUs from VMs
+    # -------------------------------------------------------
     local total_vm_vcpus
     total_vm_vcpus=$(echo "$vms_response" | jq '[.data[] | (.numSockets * .numCoresPerSocket * .numThreadsPerCore)] | add // 0')
-    echo "[INFO] Total vCPUs (all VMs): $total_vm_vcpus"
 
-    # --- Step 3b: Include CVM vCPUs ---
-    # total_cvm_vcpus is already set globally
+    echo "[INFO] Total vCPUs from ${hypervisor_type} VMs: $total_vm_vcpus"
+
+    # -------------------------------------------------------
+    # Step 4: Add CVM vCPUs (already global)
+    # -------------------------------------------------------
     local total_vcpus=$((total_vm_vcpus + total_cvm_vcpus))
-    echo "[INFO] Including CVM vCPUs: $total_cvm_vcpus, Total vCPUs (VMs + CVMs): $total_vcpus"
 
-    # --- Step 4: Compute ratio ---
-    if [[ "$total_threads" -gt 0 ]]; then
-        local ratio
-        ratio=$(awk "BEGIN {printf \"%.2f\", $total_vcpus / $total_threads}")
-        echo "vCPU_to_pCPU_Ratio,${ratio}:1" >> "$csv_file"
-        echo "[INFO] vCPU:pCPU ratio for $cluster_name = ${ratio}:1"
-    else
-        echo "vCPU_to_pCPU_Ratio,N/A" >> "$csv_file"
-        echo "[WARN] Cannot calculate ratio - total threads is zero"
-    fi
+    echo "[INFO] Including CVM vCPUs: $total_cvm_vcpus"
+    echo "[INFO] Total vCPUs (VMs + CVMs): $total_vcpus"
+
+    # -------------------------------------------------------
+    # Step 5: Compute Ratio
+    # -------------------------------------------------------
+    local ratio
+    ratio=$(awk "BEGIN {printf \"%.2f\", $total_vcpus / $total_threads}")
+
+    echo "vCPU_to_pCPU_Ratio,${ratio}:1" >> "$csv_file"
+    echo "[INFO] vCPU:pCPU ratio for $cluster_name = ${ratio}:1"
 }
 
 get_directory_services_pc() {
@@ -1108,4 +1187,61 @@ get_storage_overprovisioning_ratio() {
     echo "," >> "$csv_file"
     echo "Storage_Overprovisioning_Ratio,$ratio:1" >> "$csv_file"
     echo "[INFO] Storage overprovisioning ratio for $cluster_name: $ratio"
+}
+
+# =============================
+# CHECK REGISTRY (EXECUTION ORDER)
+# =============================
+
+REGISTERED_CHECKS=(
+  get_cluster_security_config
+  get_smtp_status
+  snmp_status_check
+  get_directory_services_pc
+  get_directory_services_pe_v2
+  get_snapshots_info
+  get_ha_state
+  lcm_version_check
+  vs_mtu_check
+  get_hosts_and_nics
+  fetch_cluster_stats
+  fetch_storage_containers
+  get_all_storage_containers_io_latency
+  get_storage_overprovisioning_ratio
+  get_host_count
+  get_offline_disks
+  get_license_details
+  get_cvm_resources
+  get_cpu_ratio
+  get_alert_parameters
+)
+
+run_all_checks() {
+    local cluster="$1"
+    local extid="$2"
+    local ext_ip="$3"
+
+    for check in "${REGISTERED_CHECKS[@]}"; do
+        echo "[INFO] Running $check on $cluster"
+
+        if declare -f "$check" >/dev/null; then
+
+            # --- ROUTING BASED ON FUNCTION NAME ---
+            case "$check" in
+                get_cluster_security_config|get_smtp_status|get_directory_services_pe_v2|get_snapshots_info|get_ha_state|get_storage_overprovisioning_ratio|vs_mtu_check)
+                    "$check" "$cluster" "$ext_ip"
+                    ;;
+                get_directory_services_pc|get_offline_disks)
+                    "$check" "$cluster"
+                    ;;
+                *)
+                    "$check" "$cluster" "$extid"
+                    ;;
+            esac
+
+        else
+            echo "[WARN] Function $check not found"
+            write_csv "$cluster" "$check" "FUNCTION_NOT_FOUND"
+        fi
+    done
 }
