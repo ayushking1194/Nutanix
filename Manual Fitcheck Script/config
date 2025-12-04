@@ -1,8 +1,8 @@
 #!/bin/bash
-# Nutanix credentials and common settings
+# Nutanix credentials
 
-# PC_IP="{pc-ip}"
-# PORT=9440 #( or any other on which PC is reachable)
+# PC_IP="{pc-ip}" #(should be in "")
+# PORT=9440 #(or any other on which PC is reachable)
 # USERNAME="{Username}"
 # PASSWORD="{Password}"
-# OUTDIR="$(pwd)"
+# OUTDIR="$(pwd)" #(use $(pwd)/batch-X)
