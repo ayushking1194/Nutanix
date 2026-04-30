@@ -1,3 +1,7 @@
+# Author :- Ayush Srivastava
+# Github :- https://github.com/ayushking1194
+# Created: 2025-11-20
+
 #!/bin/bash
 set -u pipefail
 
