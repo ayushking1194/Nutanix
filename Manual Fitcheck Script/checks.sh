@@ -1,3 +1,7 @@
+# Author :- Ayush Srivastava
+# Github :- https://github.com/ayushking1194
+# Created: 2025-11-20
+
 # =====================================================
 # HOW TO ADD A NEW CHECK
 # =====================================================
@@ -1064,6 +1068,8 @@ get_smtp_status() {
 }
 
 get_directory_services_pe_v2() {
+    # Created By :- Ayush Srivastava
+    # Nutanix :- 19263
     local cluster_name="$1"
     local ext_ip="$2"
     local csv_file="$OUTDIR/${cluster_name}.csv"
